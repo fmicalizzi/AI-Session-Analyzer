@@ -27,6 +27,8 @@ htmlcov/
 reports/
 reportes/
 output/
+test_reports/
+*_reports/
 
 # Local session logs & databases (protect privacy)
 *.jsonl
