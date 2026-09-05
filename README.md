@@ -31,7 +31,7 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 
 **Opción 1: Uso directo (sin instalación)**
 ```bash
-git clone https://github.com/tu-usuario/ai-session-analyzer.git
+git clone https://github.com/fmicalizzi/ai-session-analyzer.git
 cd ai-session-analyzer
 python3 process_sessions.py --help
 # O alternativamente:
