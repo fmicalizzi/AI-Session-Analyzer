@@ -1,0 +1,4 @@
+# AI Session Analyzer
+# This tool requires only the Python standard library (json, sqlite3, pathlib, datetime, argparse, re, os, sys).
+# No external runtime dependencies are required.
+# Recommended: Python 3.8+
