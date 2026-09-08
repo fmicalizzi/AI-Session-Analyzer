@@ -4,6 +4,7 @@ Script para procesar archivos JSONL de sesiones de Claude y extraer información
 Genera reportes organizados de mensajes, respuestas, operaciones de archivos,
 actividad de subagentes y memoria del proyecto.
 
+v5.0 - Integración con Pencil (pen.dev): sesiones de diseño adjudicadas al proyecto Claude.
 v4.1 - Integración con Qwen CLI para visibilidad de actividad paralela.
 v4.0 - Integración con Codex CLI (GPT-5.4) para enriquecer delegaciones.
 v3.0 - Soporte para subagentes, tool-results externos y memoria del proyecto.
@@ -20,6 +21,11 @@ import re
 
 
 class SessionProcessor:
+    _PATH_FALLBACK_RE = [
+        re.compile(r"/[^\'\"\s]+\.(?:js|html|css|json|md|py|ts|jsx|tsx|vue|php|txt|svg|png|jpg|jpeg|gif|liquid|rb|yaml|yml|toml|sh)"),
+        re.compile(r"[^\'\"\s/]+\.(?:js|html|css|json|md|py|ts|jsx|tsx|vue|php|txt|svg|png|jpg|jpeg|gif|liquid|rb|yaml|yml|toml|sh)"),
+    ]
+
     def __init__(self, input_dir: str, output_dir: str = None):
         target = Path(input_dir).expanduser().resolve()
         if target.is_file():
@@ -64,6 +70,11 @@ class SessionProcessor:
         # v4.1: Qwen integration
         self.qwen_dir = None
         self.qwen_sessions = []  # Parsed Qwen sessions for the same project
+
+        # v5.0: Pencil (pen.dev) integration
+        self.pencil_dir = None
+        self.pencil_sessions = []        # Parsed pi-sessions JSONL
+        self.pencil_projects = []        # CWDs detectados en sesiones Claude (para matching)
 
     # ========================================================================
     # PROCESAMIENTO PRINCIPAL - Sesiones principales
@@ -434,16 +445,12 @@ class SessionProcessor:
                     return file_obj[key]
 
         # Buscar en el texto completo si contiene rutas tipicas
-        input_str = str(tool_input)
-        path_patterns = [
-            r'/[^\'"\s]+\.(?:js|html|css|json|md|py|ts|jsx|tsx|vue|php|txt|svg|png|jpg|jpeg|gif|liquid|rb|yaml|yml|toml|sh)',
-            r'[^\'"\s/]+\.(?:js|html|css|json|md|py|ts|jsx|tsx|vue|php|txt|svg|png|jpg|jpeg|gif|liquid|rb|yaml|yml|toml|sh)'
-        ]
-
-        for pattern in path_patterns:
-            matches = re.findall(pattern, input_str)
-            if matches:
-                return matches[0]
+        # (se limita el escaneo: entradas gigantes de MCP/Write hacian explosar el regex)
+        input_str = str(tool_input)[:4000]
+        for pattern in self._PATH_FALLBACK_RE:
+            m = pattern.search(input_str)
+            if m:
+                return m.group(0)
 
         return None
 
@@ -1378,6 +1385,317 @@ class SessionProcessor:
         return session
 
     # ========================================================================
+    # V5.0: INTEGRACION PENCIL (pen.dev) - sesiones de diseño
+    # ========================================================================
+
+    PENCIL_INJECT_RE = None  # compilado perezosamente
+
+    def _collect_claude_project_cwds(self):
+        """Raices de proyecto Claude detectados en los mensajes procesados."""
+        from collections import Counter
+        cwds = Counter()
+        for msg in self.user_messages + self.assistant_responses:
+            c = msg.get('cwd', '')
+            if c:
+                cwds[c] += 1
+        return sorted(cwds.keys(), key=len, reverse=True)
+
+    @staticmethod
+    def _path_segments(path: str) -> list:
+        return [s for s in path.replace('\\', '/').split('/') if s]
+
+    def _common_prefix_len(self, a: str, b: str) -> int:
+        sa, sb = self._path_segments(a), self._path_segments(b)
+        n = 0
+        for x, y in zip(sa, sb):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    def _best_project_match(self, path: str, min_common: int = 4):
+        """Proyecto Claude con mayor prefijo comun. Ambiguo si empatan dos."""
+        if not path:
+            return None, None
+        best, best_score, ambiguous = None, 0, False
+        for proj in self.pencil_projects:
+            score = self._common_prefix_len(path, proj)
+            if score > best_score:
+                best, best_score, ambiguous = proj, score, False
+            elif score == best_score and score >= min_common and best != proj:
+                ambiguous = True
+        if best_score >= min_common and not ambiguous:
+            return best, best_score
+        return None, best_score
+
+    def _match_pencil_project(self, session: Dict[str, Any]):
+        """Adjudica un proyecto Claude a una sesion Pencil.
+        Regla 1: prefijo del cwd. Regla 2: votacion por rutas externas (.pen etc).
+        Regla 3: desempate temporal (solapamiento con sesiones Claude)."""
+        proj, score = self._best_project_match(session.get('cwd', ''))
+        if proj:
+            return proj, 'cwd'
+
+        # Regla 2: las rutas de archivos (.pen) votan el proyecto real
+        votes = {}
+        for p in session.get('external_paths', []):
+            cand, sc = self._best_project_match(p)
+            if cand and sc > votes.get(cand, 0):
+                votes[cand] = sc
+        if votes:
+            best = max(votes, key=votes.get)
+            if list(votes.values()).count(votes[best]) == 1:
+                return best, 'paths'
+
+        # Regla 3: solapamiento temporal con actividad Claude
+        start = session.get('start_time')
+        end = session.get('end_time')
+        if start and end:
+            overlap = {}
+            for msg in self.user_messages + self.assistant_responses:
+                c = msg.get('cwd', '')
+                ts = msg.get('timestamp', '')
+                if c and ts and not (end < ts or start > ts):
+                    overlap[c] = overlap.get(c, 0) + 1
+            if overlap:
+                best_cwd = max(overlap, key=overlap.get)
+                proj, _ = self._best_project_match(best_cwd, min_common=0)
+                if proj:
+                    return proj, 'tiempo'
+
+        return None, None
+
+    def _clean_pencil_user_text(self, text: str) -> str:
+        """Recorta el contexto inyectado por la app (app_state, adjuntos de nodos)."""
+        if not text:
+            return ''
+        import re
+        if SessionProcessor.PENCIL_INJECT_RE is None:
+            SessionProcessor.PENCIL_INJECT_RE = re.compile(
+                r"\n*The result of `[^`]+` tool call:"
+                r"|\n*This app state was fetched"
+                r"|\n*\[Image: |<system-reminder>", re.I
+            )
+        m = SessionProcessor.PENCIL_INJECT_RE.search(text)
+        if m:
+            text = text[:m.start()]
+        # Blobo de adjuntos estilo @{"type":"nodes",...} al inicio
+        text = re.sub(r'^@\{".*?\}(?=\S)', '', text, flags=re.S)
+        return text.strip()
+
+    def _extract_paths_from_text(self, text: str, out: set):
+        import re
+        for m in re.finditer(r'/(?:Users|home)/[^\s"\'`,)\]}]+', text or ''):
+            out.add(m.group(0))
+
+    def _load_pencil_desktop_index(self, sessions_dir: Path) -> Dict[str, Dict]:
+        """Indexa sesiones desktop de Pencil por nombre del .jsonl vinculado."""
+        index = {}
+        for jf in sorted(sessions_dir.glob("*.json")):
+            try:
+                with open(jf, 'r', encoding='utf-8', errors='replace') as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            conv = data.get('conversation', {})
+            if not isinstance(conv, dict):
+                continue
+            sid = conv.get('sessionId', '')
+            title = conv.get('title', '')
+            model_id = conv.get('modelID', '')
+            paths = set()
+            for msg in conv.get('messages', []):
+                self._extract_paths_from_text(msg.get('text', ''), paths)
+            entry = {
+                'file': jf.name, 'title': title, 'model_id': model_id,
+                'external_paths': paths,
+            }
+            if sid:
+                index[Path(sid).name] = entry
+            index.setdefault(jf.stem, entry)
+        return index
+
+    def _parse_pencil_session(self, file_path: Path) -> Optional[Dict]:
+        """Parsea un .jsonl de pi-sessions (agente Pencil) en streaming."""
+        session = {
+            'file': file_path.name,
+            'session_id': '',
+            'cwd': '',
+            'start_time': None,
+            'end_time': None,
+            'provider': '',
+            'models_used': {},          # {model: n_requests}
+            'model_usage': {},          # {model: {input,output,reasoning,total,cost,requests}}
+            'qa_pairs': [],             # [{'user','assistant','ts_user','ts_assistant'}]
+            'tool_calls': {},           # {name: count}
+            'external_paths': set(),
+            'usage': {'input': 0, 'output': 0, 'reasoning': 0, 'cache_read': 0,
+                      'cache_write': 0, 'total': 0, 'cost': 0.0},
+            'total_lines': 0,
+            'title': '',
+            'desktop_file': '',
+            'project': None,
+            'match_rule': None,
+        }
+        current_model = ''
+        pending_user = None  # (text, ts)
+        pending_assistant = []  # textos del turno actual
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+
+                    session['total_lines'] += 1
+                    dtype = data.get('type', '')
+                    ts = data.get('timestamp', '')
+                    if ts:
+                        if not session['start_time']:
+                            session['start_time'] = ts
+                        session['end_time'] = ts
+
+                    if dtype == 'session':
+                        session['session_id'] = data.get('id', file_path.stem)
+                        session['cwd'] = data.get('cwd', '')
+                        continue
+
+                    if dtype == 'model_change':
+                        current_model = f"{data.get('provider', '')}/{data.get('modelId', '')}".strip('/')
+                        session['provider'] = data.get('provider', session['provider'])
+                        continue
+
+                    if dtype != 'message':
+                        continue
+
+                    msg = data.get('message', {})
+                    role = msg.get('role', '')
+                    content = msg.get('content', [])
+                    if isinstance(content, str):
+                        content = [{'type': 'text', 'text': content}]
+
+                    if role == 'user':
+                        texts = [c.get('text', '') for c in content
+                                 if isinstance(c, dict) and c.get('type') == 'text']
+                        clean = self._clean_pencil_user_text('\n'.join(texts))
+                        for t in texts:
+                            self._extract_paths_from_text(t, session['external_paths'])
+                        if pending_user:
+                            session['qa_pairs'].append({
+                                'user': pending_user[0],
+                                'assistant': '\n\n'.join(pending_assistant),
+                                'ts_user': pending_user[1], 'ts_assistant': ts,
+                            })
+                        pending_user = (clean, ts) if clean else None
+                        pending_assistant = []
+
+                    elif role == 'assistant':
+                        model = msg.get('model') or current_model
+                        usage = msg.get('usage') or {}
+                        if model:
+                            session['models_used'][model] = session['models_used'].get(model, 0) + 1
+                            mu = session['model_usage'].setdefault(model, {
+                                'input': 0, 'output': 0, 'reasoning': 0,
+                                'total': 0, 'cost': 0.0, 'requests': 0})
+                            mu['input'] += usage.get('input', 0)
+                            mu['output'] += usage.get('output', 0)
+                            mu['reasoning'] += usage.get('reasoning', 0)
+                            mu['total'] += usage.get('totalTokens', 0)
+                            mu['cost'] += (usage.get('cost') or {}).get('total', 0)
+                            mu['requests'] += 1
+                        u = session['usage']
+                        u['input'] += usage.get('input', 0)
+                        u['output'] += usage.get('output', 0)
+                        u['reasoning'] += usage.get('reasoning', 0)
+                        u['cache_read'] += usage.get('cacheRead', 0)
+                        u['cache_write'] += usage.get('cacheWrite', 0)
+                        u['total'] += usage.get('totalTokens', 0)
+                        u['cost'] += (usage.get('cost') or {}).get('total', 0)
+                        for c in content:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get('type') == 'toolCall':
+                                name = c.get('name', '?')
+                                session['tool_calls'][name] = session['tool_calls'].get(name, 0) + 1
+                                args = c.get('arguments') or {}
+                                fp = args.get('filePath') or args.get('file_path') or ''
+                                if fp:
+                                    session['external_paths'].add(fp)
+                            elif c.get('type') == 'text':
+                                t = c.get('text', '').strip()
+                                if t:
+                                    pending_assistant.append(t)
+                        if pending_user and pending_assistant:
+                            session['qa_pairs'].append({
+                                'user': pending_user[0],
+                                'assistant': '\n\n'.join(pending_assistant),
+                                'ts_user': pending_user[1], 'ts_assistant': ts,
+                            })
+                            pending_user = None
+                            pending_assistant = []
+
+                    elif role == 'toolResult':
+                        res = msg.get('content', [])
+                        if isinstance(res, list):
+                            for c in res:
+                                if isinstance(c, dict) and c.get('type') == 'text':
+                                    self._extract_paths_from_text(c.get('text', ''), session['external_paths'])
+
+            if pending_user:
+                session['qa_pairs'].append({
+                    'user': pending_user[0], 'assistant': '\n\n'.join(pending_assistant),
+                    'ts_user': pending_user[1], 'ts_assistant': None,
+                })
+
+        except Exception as e:
+            print(f"    Error parseando {file_path.name}: {e}")
+            return None
+
+        # Sanitizar: limitar largos y eliminar rutas sin proyecto posible
+        session['external_paths'] = {p for p in session['external_paths']
+                                     if len(self._path_segments(p)) >= 3}
+        return session
+
+    def _load_pencil_sessions(self, pencil_dir: str):
+        """Carga sesiones Pencil (pi-sessions) y las adjudica a proyectos Claude."""
+        base = Path(pencil_dir).expanduser().resolve()
+        pi_dir = base / "pi-sessions"
+        desk_dir = base / "sessions"
+        if not pi_dir.exists():
+            print(f"  WARN: {pi_dir} no encontrado")
+            return
+
+        self.pencil_projects = self._collect_claude_project_cwds()
+        desktop_index = {}
+        if desk_dir.exists():
+            desktop_index = self._load_pencil_desktop_index(desk_dir)
+
+        chat_files = sorted(pi_dir.glob("*.jsonl"))
+        print(f"  Sesiones Pencil encontradas: {len(chat_files)} | proyectos Claude: {len(self.pencil_projects)}")
+
+        for cf in chat_files:
+            s = self._parse_pencil_session(cf)
+            if not s:
+                continue
+            desk = desktop_index.get(cf.name)
+            if desk:
+                s['title'] = desk['title']
+                s['desktop_file'] = desk['file']
+                s['external_paths'] |= desk['external_paths']
+            proj, rule = self._match_pencil_project(s)
+            s['project'], s['match_rule'] = proj, rule
+            self.pencil_sessions.append(s)
+
+        matched = sum(1 for s in self.pencil_sessions if s['project'])
+        print(f"  Sesiones Pencil parseadas: {len(self.pencil_sessions)} "
+              f"(con proyecto Claude: {matched}, sin proyecto: {len(self.pencil_sessions) - matched})")
+
+    # ========================================================================
     # GENERACION DE REPORTES
     # ========================================================================
 
@@ -1412,6 +1730,11 @@ class SessionProcessor:
         # v4.1: Reporte paralelo de Qwen
         if self.qwen_sessions:
             self._generate_qwen_parallel_report()
+
+        # v5.0: Reportes Pencil (diseno)
+        if self.pencil_sessions:
+            self._generate_pencil_report()
+            self._generate_pencil_models_report()
 
         print(f"Reportes generados exitosamente en {self.output_dir}")
         print(f"{len(os.listdir(self.output_dir))} archivos creados")
@@ -2309,6 +2632,27 @@ class SessionProcessor:
             tipo = 'subagent' if 'haiku' in model.lower() else ('compaction' if 'synthetic' in model.lower() else 'principal')
             content.append(f"| {model} | {count} | {tipo} |\n")
 
+        # v5.0: Consumo Pencil (diseno)
+        if self.pencil_sessions:
+            content.append("\n---\n\n")
+            content.append("## Consumo Pencil (Agente de Diseño)\n\n")
+            p_input = sum(s['usage']['input'] for s in self.pencil_sessions)
+            p_output = sum(s['usage']['output'] for s in self.pencil_sessions)
+            p_reason = sum(s['usage']['reasoning'] for s in self.pencil_sessions)
+            p_total = sum(s['usage']['total'] for s in self.pencil_sessions)
+            p_cost = sum(s['usage']['cost'] for s in self.pencil_sessions)
+            p_turns = sum(len(s['qa_pairs']) for s in self.pencil_sessions)
+            content.append(f"| Concepto | Valor |\n|----------|------:|\n")
+            content.append(f"| Sesiones | {len(self.pencil_sessions)} |\n")
+            content.append(f"| Turnos Q&A | {p_turns} |\n")
+            content.append(f"| Input tokens | {p_input:,} |\n")
+            content.append(f"| Output tokens | {p_output:,} |\n")
+            content.append(f"| Reasoning tokens | {p_reason:,} |\n")
+            content.append(f"| **Total tokens** | **{p_total:,}** |\n")
+            content.append(f"| **Costo reportado** | **${p_cost:.4f}** |\n")
+            content.append(f"| Costo por turno | ${(p_cost / p_turns) if p_turns else 0:.4f} |\n")
+            content.append("\n*Detalle por modelo en `13_pencil_modelos_uso.md`.*\n")
+
         full_content = ''.join(content)
         self._split_large_file(output_file, full_content)
         print(f"  Reporte de eficiencia generado: {output_file.name}")
@@ -2983,6 +3327,167 @@ class SessionProcessor:
         self._split_large_file(output_file, full_content)
         print(f"  Reporte Qwen paralelo generado: {output_file.name}")
 
+    # ========================================================================
+    # V5.0: REPORTES PENCIL
+    # ========================================================================
+
+    def _generate_pencil_report(self):
+        """Reporte de sesiones de diseno Pencil agrupadas por proyecto Claude,
+        con el Q&A completo (prompts del usuario + respuestas del agente)."""
+        output_file = self.output_dir / "12_pencil_sesiones_diseno.md"
+
+        matched = {}
+        unmatched = []
+        for s in self.pencil_sessions:
+            if s['project']:
+                matched.setdefault(s['project'], []).append(s)
+            else:
+                unmatched.append(s)
+
+        content = []
+        content.append("# Sesiones de Diseno: Pencil (pen.dev)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append(f"- Sesiones procesadas: **{len(self.pencil_sessions)}**\n")
+        content.append(f"- Vinculadas a un proyecto Claude: **{sum(len(v) for v in matched.values())}** "
+                       f"(regla cwd: {sum(1 for s in self.pencil_sessions if s['match_rule'] == 'cwd')}, "
+                       f"por rutas .pen: {sum(1 for s in self.pencil_sessions if s['match_rule'] == 'paths')}, "
+                       f"por solapamiento temporal: {sum(1 for s in self.pencil_sessions if s['match_rule'] == 'tiempo')})\n")
+        content.append(f"- Sin proyecto identificable: **{len(unmatched)}**\n\n")
+
+        def render_session(s):
+            name = s['title'] or s['file'][:40]
+            content.append(f"### {name}\n\n")
+            content.append(f"- **Archivo:** `{s['file']}`" +
+                           (f" | **Desktop:** `{s['desktop_file']}`" if s['desktop_file'] else "") + "\n")
+            content.append(f"- **Periodo:** {self._format_timestamp(s['start_time'] or '')} -> "
+                           f"{self._format_timestamp(s['end_time'] or '')}"
+                           f" ({self._calculate_interaction_duration(s['start_time'] or '', s['end_time'] or '') or 'N/A'})\n")
+            content.append(f"- **CWD (Pencil):** `{s['cwd'] or '?'}`\n")
+            if s['models_used']:
+                models = ', '.join(f"{m} ({c})" for m, c in
+                                   sorted(s['models_used'].items(), key=lambda x: -x[1]))
+                content.append(f"- **Modelos:** {models}\n")
+            u = s['usage']
+            content.append(f"- **Tokens:** {u['total']:,} (in {u['input']:,} / out {u['output']:,} / "
+                           f"reasoning {u['reasoning']:,}) | **Costo:** ${u['cost']:.4f}\n")
+            if s['tool_calls']:
+                tools = ', '.join(f"{t} ({c})" for t, c in
+                                  sorted(s['tool_calls'].items(), key=lambda x: -x[1]))
+                content.append(f"- **Tools:** {tools}\n")
+            pen_files = sorted(p for p in s['external_paths'] if p.endswith('.pen'))
+            if pen_files:
+                content.append(f"- **Documentos .pen:** " + '; '.join(f"`{p}`" for p in pen_files[:8]) +
+                               (f" (+{len(pen_files) - 8})" if len(pen_files) > 8 else "") + "\n")
+            content.append(f"- **Turnos Q&A:** {len(s['qa_pairs'])}\n\n")
+
+            for i, qa in enumerate(s['qa_pairs'], 1):
+                ts = self._format_timestamp(qa.get('ts_user') or '')
+                content.append(f"#### [{i}] Usuario ({ts}):\n\n")
+                ut = qa['user']
+                if len(ut) > 8000:
+                    content.append(ut[:8000] + f"\n\n_[... {len(ut):,} caracteres totales ...]_\n\n")
+                else:
+                    content.append(ut + "\n\n")
+                at = qa['assistant']
+                if at:
+                    content.append(f"**Agente:**\n\n")
+                    if len(at) > 12000:
+                        content.append(at[:12000] + f"\n\n_[... {len(at):,} caracteres totales ...]_\n\n")
+                    else:
+                        content.append(at + "\n\n")
+                else:
+                    content.append("**Agente:** _(sin respuesta de texto; solo operaciones)_\n\n")
+
+        for proj in sorted(matched, key=lambda p: -len(matched[p])):
+            sess = sorted(matched[proj], key=lambda s: s['start_time'] or '')
+            tot_tokens = sum(s['usage']['total'] for s in sess)
+            tot_cost = sum(s['usage']['cost'] for s in sess)
+            content.append("---\n\n")
+            content.append(f"## Proyecto: `{Path(proj).name}`\n\n")
+            content.append(f"- **Ruta Claude:** `{proj}`\n")
+            content.append(f"- **Sesiones Pencil:** {len(sess)} | "
+                           f"**Total tokens:** {tot_tokens:,} | **Total costo:** ${tot_cost:.4f}\n\n")
+            content.append("**Cronologia:** " + '; '.join(
+                f"{(s['start_time'] or '')[:10]} {s['file'][:14]}" for s in sess) + "\n\n")
+
+            for s in sess:
+                render_session(s)
+
+        if unmatched:
+            content.append("---\n\n")
+            content.append("## Sin proyecto identificable\n\n")
+            content.append("*Sesiones cuyo cwd no coincide con ningun proyecto Claude analizado "
+                           "(documentos gestionados de Pencil, cwd raiz, etc.).*\n\n")
+            for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
+                render_session(s)
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte sesiones Pencil generado: {output_file.name}")
+
+    def _generate_pencil_models_report(self):
+        """Estadisticas de uso de modelos en sesiones Pencil: tokens, costo,
+        turnos y tasa de respuestas textuales por modelo."""
+        output_file = self.output_dir / "13_pencil_modelos_uso.md"
+
+        agg = {}
+        for s in self.pencil_sessions:
+            for model, mu in s['model_usage'].items():
+                a = agg.setdefault(model, {
+                    'input': 0, 'output': 0, 'reasoning': 0, 'total': 0, 'cost': 0.0,
+                    'requests': 0, 'sessions': set(), 'turns': 0, 'answered_turns': 0})
+                a['input'] += mu['input']
+                a['output'] += mu['output']
+                a['reasoning'] += mu['reasoning']
+                a['total'] += mu['total']
+                a['cost'] += mu['cost']
+                a['requests'] += mu['requests']
+                a['sessions'].add(s['file'])
+            qas = s['qa_pairs']
+            dominant = max(s['model_usage'], key=lambda m: s['model_usage'][m]['requests']) \
+                if s['model_usage'] else ''
+            if dominant and dominant in agg:
+                agg[dominant]['turns'] += len(qas)
+                agg[dominant]['answered_turns'] += sum(1 for q in qas if q['assistant'])
+
+        content = []
+        content.append("# Uso de Modelos en Diseno (Pencil)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append("*Permite validar con que modelo de agente de diseno rinde mejor el trabajo: "
+                       "costo por turno, tokens reasoning y tasa de turnos con respuesta de texto.*\n\n")
+
+        content.append("| Modelo | Sesiones | Requests | Tokens totales | Output | Reasoning | Costo (USD) | $/turno | T. con respuesta |\n")
+        content.append("|--------|---------:|---------:|--------------:|-------:|----------:|------------:|--------:|----------------:|\n")
+        for model, a in sorted(agg.items(), key=lambda x: -x[1]['cost']):
+            cost_per_turn = a['cost'] / a['turns'] if a['turns'] else 0
+            ans_rate = (a['answered_turns'] / a['turns'] * 100) if a['turns'] else None
+            ans_str = f"{ans_rate:.0f}%" if ans_rate is not None else "—"
+            content.append(
+                f"| {model} | {len(a['sessions'])} | {a['requests']:,} | {a['total']:,} "
+                f"| {a['output']:,} | {a['reasoning']:,} | ${a['cost']:.4f} "
+                f"| ${cost_per_turn:.4f} | {ans_str} |\n")
+
+        tot = {k: sum(a[k] for a in agg.values()) for k in ('input', 'output', 'reasoning', 'total')}
+        tot['cost'] = sum(a['cost'] for a in agg.values())
+        content.append(f"\n**Total Pencil:** {tot['total']:,} tokens | costo ${tot['cost']:.4f} | "
+                       f"{sum(a['requests'] for a in agg.values()):,} requests API\n\n")
+
+        content.append("---\n\n## Desglose por sesion\n\n")
+        content.append("| Sesion | Titulo | Proyecto | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
+        content.append("|--------|--------|----------|-------------------------|-------:|-------:|------:|\n")
+        for s in sorted(self.pencil_sessions, key=lambda s: s['start_time'] or ''):
+            top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['cost'])[:2]
+            models_str = ', '.join(m for m, _ in top_models) or '—'
+            proj = Path(s['project']).name if s['project'] else '—'
+            title = (s['title'] or s['file'])[:40].replace('|', '/')
+            content.append(
+                f"| `{s['file'][:20]}...` | {title} | {proj} | {models_str} | {len(s['qa_pairs'])} "
+                f"| {s['usage']['total']:,} | ${s['usage']['cost']:.4f} |\n")
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte modelos Pencil generado: {output_file.name}")
+
     def _split_large_file(self, file_path: Path, content: str, max_size_mb: int = 2):
         """Divide archivos grandes en multiples partes si superan el tamano maximo"""
         max_size_bytes = max_size_mb * 1024 * 1024
@@ -3059,7 +3564,7 @@ class SessionProcessor:
     # ENTRADA PRINCIPAL
     # ========================================================================
 
-    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None):
+    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None):
         """Procesa todos los archivos JSONL en el directorio o el archivo indicado"""
         if self.input_file:
             jsonl_files = [self.input_file]
@@ -3095,7 +3600,14 @@ class SessionProcessor:
                 print(f"\nCargando sesiones de Qwen desde {qwen_dir}...")
                 self._load_qwen_sessions(qwen_dir)
 
-            if self.subagent_data or self.memory_data or self.codex_matched or self.qwen_sessions:
+            # v5.0: Cargar sesiones de Pencil
+            if pencil_dir:
+                self.pencil_dir = pencil_dir
+                print(f"\nCargando sesiones de Pencil desde {pencil_dir}...")
+                self._load_pencil_sessions(pencil_dir)
+
+            if (self.subagent_data or self.memory_data or self.codex_matched
+                    or self.qwen_sessions or self.pencil_sessions):
                 self.generate_reports()
             else:
                 print("No se encontraron datos para procesar.")
@@ -3141,6 +3653,12 @@ class SessionProcessor:
             print(f"\nCargando sesiones de Qwen desde {qwen_dir}...")
             self._load_qwen_sessions(qwen_dir)
 
+        # v5.0: Cargar sesiones de Pencil
+        if pencil_dir:
+            self.pencil_dir = pencil_dir
+            print(f"\nCargando sesiones de Pencil desde {pencil_dir}...")
+            self._load_pencil_sessions(pencil_dir)
+
         # Generar reportes
         self.generate_reports()
 
@@ -3154,7 +3672,7 @@ class SessionProcessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Procesar sesiones de Claude Code v4.1 (subagentes, memoria, integración Codex + Qwen)',
+        description='Procesar sesiones de Claude Code v5.0 (subagentes, memoria, integración Codex + Qwen + Pencil)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
@@ -3163,13 +3681,14 @@ Ejemplos:
   python3 process_sessions.py . -o reportes --codex-dir ~/.codex/
   python3 process_sessions.py . -o reportes --qwen-dir ~/.qwen/
   python3 process_sessions.py . -o reportes --codex-dir ~/.codex/ --qwen-dir ~/.qwen/
+  python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
   python3 process_sessions.py . --file-history CLAUDE.md
   python3 process_sessions.py . --no-subagents
         """
     )
     parser.add_argument('input_dir', nargs='?', default='.',
                         help='Directorio con archivos .jsonl o archivo individual (por defecto: \'.\')')
-    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v4.1.0')
+    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.0.0')
     parser.add_argument('-o', '--output', help='Directorio de salida para reportes')
     parser.add_argument('--last', type=int, help='Extraer las ultimas N conversaciones en un archivo separado')
     parser.add_argument('--file-history', help='Generar historial completo de modificaciones para un archivo especifico')
@@ -3179,6 +3698,8 @@ Ejemplos:
                         help='Directorio de Codex CLI (~/.codex/) para integrar delegaciones')
     parser.add_argument('--qwen-dir',
                         help='Directorio de Qwen CLI (~/.qwen/) para incluir sesiones paralelas')
+    parser.add_argument('--pencil-dir',
+                        help='Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño')
 
     args = parser.parse_args()
 
@@ -3188,7 +3709,7 @@ Ejemplos:
         sys.exit(1)
 
     processor = SessionProcessor(args.input_dir, args.output)
-    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir)
+    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir)
 
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Dependencies: Stdlib Only](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-brightgreen.svg)](requirements.txt)
 
-Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
+Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
 
 ## Descripcion
 
-Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4) y actividad paralela de Qwen sobre los mismos proyectos. Genera reportes detallados que incluyen:
+Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen y sesiones de diseño de Pencil (pen.dev) sobre los mismos proyectos. Genera reportes detallados que incluyen:
 - Historico de mensajes del usuario
 - Respuestas del sistema
 - Pares de preguntas y respuestas
@@ -20,6 +20,7 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 - **v3.1:** Reporte de eficiencia y consumo de tokens (por sesion, ranking, modelos)
 - **v4.0:** Integracion con Codex CLI (GPT-5.4) — detecta delegaciones, matchea sesiones, enriquece reportes
 - **v4.1:** Integracion con Qwen CLI — visibilidad de actividad paralela en el mismo proyecto
+- **v5.0:** Integracion con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicacion inteligente al proyecto Claude (cwd/.pen/timestamps) + estadisticas por modelo
 
 ## Instalacion
 
@@ -96,6 +97,12 @@ python3 process_sessions.py . -o reportes --qwen-dir ~/.qwen/
 python3 process_sessions.py . -o reportes --codex-dir ~/.codex/ --qwen-dir ~/.qwen/
 ```
 
+### Funcionalidades v5.0 (Integracion Pencil)
+```bash
+# Incluir sesiones de diseno del agente Pencil, adjudicadas al proyecto Claude
+python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
+```
+
 ### Ver todas las opciones
 ```bash
 python3 process_sessions.py --help
@@ -132,6 +139,8 @@ tu-proyecto/
     ├── 09_eficiencia_tokens.md           # v3.1
     ├── 10_codex_integrado.md             # v4.0 (con --codex-dir)
     ├── 11_qwen_paralelo.md               # v4.1 (con --qwen-dir)
+    ├── 12_pencil_sesiones_diseno.md      # v5.0 (con --pencil-dir)
+    ├── 13_pencil_modelos_uso.md          # v5.0 (con --pencil-dir)
     ├── log_operaciones_archivos.md
     ├── ultimas_N_conversaciones.md       (opcional con --last)
     └── historial_ARCHIVO.md              (opcional con --file-history)
@@ -156,6 +165,16 @@ Ver `CODEX_DATA_GUIDE.md` para documentacion detallada del formato.
         └── chats/
             └── {uuid}.jsonl         # Sesiones (formato similar a Claude)
 ```
+
+### Datos de Pencil (fuente externa, v5.0)
+```
+~/.pencil/                           # Directorio de Pencil (--pencil-dir)
+├── pi-sessions/
+│   └── {ts}_{uuid}.jsonl            # Log del agente: cabecera con CWD + mensajes con usage
+└── sessions/
+    └── {uuid}.json                  # Desktop: titulo + vinculo sessionId -> .jsonl
+```
+Ver `PENCIL_DATA_GUIDE.md` para el formato y el algoritmo de adjudicacion.
 
 ## Reportes Generados
 
@@ -274,18 +293,46 @@ Util para:
 - Comparar enfoques entre agentes para el mismo problema
 - Recuperar analisis o datos que Qwen genero independientemente
 
-### 13. Log de Operaciones CSV (`log_operaciones_archivos.md`)
+### 13. Sesiones de Diseño Pencil (`12_pencil_sesiones_diseno.md`) - v5.0
+**Nuevo en v5.0! Requiere `--pencil-dir`**
+
+Sesiones del agente de diseño Pencil, agrupadas por el proyecto Claude al que pertenecen:
+- **Adjudicacion inteligente** en 3 reglas auditables (cada sesion reporta cual la gano):
+  1. `cwd` — prefijo comun mas largo entre el directorio de la sesion Pencil y los proyectos Claude (funciona con subcarpetas del proyecto)
+  2. `paths` — votacion por rutas de archivos `.pen` cuando el cwd es un documento gestionado o raiz
+  3. `tiempo` — desempate por solapamiento con actividad Claude
+- **Q&A recuperado:** prompt real del usuario (sin el contexto inyectado por la app) + respuesta final del agente, por turno, con timestamp
+- **Metadata por sesion:** titulo, cronologia, modelo(s), tokens, costo USD, tools usadas, documentos `.pen` tocados
+- Seccion final "Sin proyecto identificable" para auditoria de sesiones sueltas
+
+Util para:
+- Retomar trabajo de diseno sin reconstruir el contexto de la conversacion anterior
+- Saber que se pidio y que se acordo en cada sesion de maquetacion
+
+### 14. Uso de Modelos Pencil (`13_pencil_modelos_uso.md`) - v5.0
+**Nuevo en v5.0! Requiere `--pencil-dir`**
+
+Estadisticas de uso por modelo en las sesiones de diseno:
+- Tokens (input/output/reasoning), requests API y **costo real en USD** por modelo
+- **$/turno** de conversacion y **tasa de turnos con respuesta de texto**
+- Desglose por sesion con titulo, proyecto adjudicado y modelo dominante
+
+Util para:
+- Validar con que modelo rinde mejor el trabajo de diseno y con cual continuar
+- Comparar costo/eficiencia entre modelos en el mismo flujo
+
+### 15. Log de Operaciones CSV (`log_operaciones_archivos.md`)
 Log simple compatible con Excel/Google Sheets:
 - **Formato**: `Operacion;Ruta;Herramienta;Sesion;Timestamp;Origen`
 - v3.0: Columna `Origen` indica si es sesion principal o subagente
 - Importable: Usar `;` como separador en hojas de calculo
 
-### 14. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
+### 16. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
 **Generado con `--last N`**
 - Extrae las ultimas N conversaciones mas recientes
 - v3.0: Incluye subagentes vinculados a cada interaccion
 
-### 15. Historial de Archivo (`historial_ARCHIVO.md`)
+### 17. Historial de Archivo (`historial_ARCHIVO.md`)
 **Generado con `--file-history FILENAME`**
 - Timeline completo de modificaciones de un archivo especifico
 - v3.0: Incluye modificaciones hechas por subagentes
@@ -346,12 +393,33 @@ Qwen usa JSONL similar a Claude pero con diferencias:
 - Herramienta principal: `run_shell_command`
 - Eventos `type: "system"` con telemetria (se ignoran)
 
+## Integracion con Pencil (v5.0)
+
+Pencil (pen.dev) es una herramienta de diseño con agente de IA. Sus sesiones no son delegadas por Claude sino que ocurren **en paralelo**, sobre subcarpetas del mismo proyecto (ej. `.../Video-06/03-storyboard`).
+
+Con `--pencil-dir`, el script:
+1. **Parsea en streaming** `~/.pencil/pi-sessions/*.jsonl` (log real del agente; archivos de +45 MB)
+2. **Indexa** `~/.pencil/sessions/*.json` (desktop) para titulos y vinculo 1:1 con cada `.jsonl`
+3. **Adjudica cada sesion** al proyecto Claude por prefijo de cwd → votacion por rutas `.pen` → solapamiento temporal
+4. **Recupera el Q&A** limpio de contexto inyectado, con tokens y costo USD por turno
+5. **Genera** `12_pencil_sesiones_diseno.md`, `13_pencil_modelos_uso.md` y seccion Pencil en `09_eficiencia_tokens.md`
+
+### Formato de datos de Pencil
+
+- Cabecera `{"type":"session", "cwd": ...}` con el directorio de trabajo
+- Eventos `model_change` (provider/modelId vigente hasta el proximo cambio)
+- Mensajes con `usage` por request: input/output/reasoning/cache + `cost.total` (USD real)
+- `toolCall.arguments.filePath` referencia los `.pen` trabajados (nunca se leen: estan cifrados)
+
+Ver `PENCIL_DATA_GUIDE.md` para documentacion detallada del formato y el algoritmo de matching.
+
 ## Opciones de Linea de Comandos
 
 ```
 usage: process_sessions.py [-h] [-v] [-o OUTPUT] [--last LAST]
                            [--file-history FILE_HISTORY] [--no-subagents]
                            [--codex-dir CODEX_DIR] [--qwen-dir QWEN_DIR]
+                           [--pencil-dir PENCIL_DIR]
                            [input_dir]
 
 Argumentos:
@@ -363,6 +431,7 @@ Argumentos:
   --no-subagents        No procesar subagentes ni tool-results
   --codex-dir DIR       Directorio de Codex CLI (~/.codex/) para integrar delegaciones
   --qwen-dir DIR        Directorio de Qwen CLI (~/.qwen/) para incluir sesiones paralelas
+  --pencil-dir DIR      Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño
 ```
 
 ## Caracteristicas Tecnicas
@@ -373,6 +442,7 @@ Argumentos:
 - v3.0: Detecta carpeta `memory/` si existe
 - v4.0: Detecta invocaciones a Codex por patrones en tool_use
 - v4.1: Matchea proyecto Claude con proyecto Qwen por CWD
+- v5.0: Adjudica sesiones Pencil al proyecto Claude por prefijo de cwd, votacion por rutas .pen o solapamiento temporal
 - Procesa multiples sesiones
 
 ### Extraccion Inteligente
@@ -404,7 +474,20 @@ Argumentos:
 
 ## Actualizaciones
 
-### Version 4.1 (Actual)
+### Version 5.0 (Actual)
+- Integracion con Pencil / pen.dev (agente de diseño) via `--pencil-dir`
+- Parser streaming de `pi-sessions/*.jsonl` (archivos de hasta +45 MB)
+- Adjudicacion inteligente al proyecto Claude en 3 reglas auditables: prefijo de cwd ->
+  votacion por rutas `.pen` -> solapamiento temporal (cada sesion reporta la regla usada)
+- Recuperacion de Q&A de diseño: prompt del usuario (limpio de contexto inyectado por la app)
+  + respuesta final del agente — para retomar trabajo sin reconstruir contexto
+- Nuevo reporte: `12_pencil_sesiones_diseno.md` — sesiones agrupadas por proyecto con cronologia
+- Nuevo reporte: `13_pencil_modelos_uso.md` — tokens, costo real USD, $/turno y tasa de
+  respuesta por modelo (validar con que modelo conviene seguir diseñando)
+- Seccion "Consumo Pencil" agregada a `09_eficiencia_tokens.md`
+- Documentacion de formato en `PENCIL_DATA_GUIDE.md`
+
+### Version 4.1
 - Integracion con Qwen CLI via `--qwen-dir`
 - Deteccion automatica de sesiones Qwen del mismo proyecto (por CWD)
 - Parser de formato Qwen (parts, functionCall/functionResponse, model role)
