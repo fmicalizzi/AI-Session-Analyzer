@@ -413,6 +413,14 @@ Con `--pencil-dir`, el script:
 
 Ver `PENCIL_DATA_GUIDE.md` para documentacion detallada del formato y el algoritmo de matching.
 
+### Guías de integración
+
+| Guía | Contenido |
+|------|-----------|
+| `CODEX_DATA_GUIDE.md` | Formato de datos de Codex CLI |
+| `PENCIL_DATA_GUIDE.md` | Formato de datos de Pencil + algoritmo de adjudicacion |
+| `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (OpenCode, Antigravity CLI, etc.) con trampas de performance ya conocidas |
+
 ## Opciones de Linea de Comandos
 
 ```
