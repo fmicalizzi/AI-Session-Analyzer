@@ -4,6 +4,7 @@ Script para procesar archivos JSONL de sesiones de Claude y extraer información
 Genera reportes organizados de mensajes, respuestas, operaciones de archivos,
 actividad de subagentes y memoria del proyecto.
 
+v5.1 - Integración con OpenCode CLI: sesiones paralelas desde opencode.db adjudicadas al proyecto Claude.
 v5.0 - Integración con Pencil (pen.dev): sesiones de diseño adjudicadas al proyecto Claude.
 v4.1 - Integración con Qwen CLI para visibilidad de actividad paralela.
 v4.0 - Integración con Codex CLI (GPT-5.4) para enriquecer delegaciones.
@@ -13,8 +14,9 @@ v3.0 - Soporte para subagentes, tool-results externos y memoria del proyecto.
 import json
 import os
 import sys
+import sqlite3
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Set, Tuple
 import argparse
 import re
@@ -75,6 +77,11 @@ class SessionProcessor:
         self.pencil_dir = None
         self.pencil_sessions = []        # Parsed pi-sessions JSONL
         self.pencil_projects = []        # CWDs detectados en sesiones Claude (para matching)
+
+        # v5.1: OpenCode integration
+        self.opencode_dir = None
+        self.opencode_sessions = []      # Sesiones parseadas desde opencode.db (SQLite)
+        self.opencode_projects = []      # CWDs detectados en sesiones Claude (para matching)
 
     # ========================================================================
     # PROCESAMIENTO PRINCIPAL - Sesiones principales
@@ -1413,13 +1420,22 @@ class SessionProcessor:
             n += 1
         return n
 
-    def _best_project_match(self, path: str, min_common: int = 4):
-        """Proyecto Claude con mayor prefijo comun. Ambiguo si empatan dos."""
+    def _best_project_match(self, path: str, min_common: int = 4, projects: list = None):
+        """Proyecto Claude con mayor prefijo comun. Ambiguo si empatan dos.
+        projects=None usa la lista de Pencil (compatibilidad v5.0).
+        v5.1: ademas del minimo de segmentos, exige contencion real: el path
+        debe estar en la raiz del proyecto o por debajo (evita falsos positivos
+        con caminos hermanos o con la raiz comun ~/Claude)."""
         if not path:
             return None, None
+        pool = self.pencil_projects if projects is None else projects
         best, best_score, ambiguous = None, 0, False
-        for proj in self.pencil_projects:
+        for proj in pool:
             score = self._common_prefix_len(path, proj)
+            if score < min_common:
+                continue
+            if score < len(self._path_segments(proj)):
+                continue  # el path no esta dentro del proyecto
             if score > best_score:
                 best, best_score, ambiguous = proj, score, False
             elif score == best_score and score >= min_common and best != proj:
@@ -1696,6 +1712,346 @@ class SessionProcessor:
               f"(con proyecto Claude: {matched}, sin proyecto: {len(self.pencil_sessions) - matched})")
 
     # ========================================================================
+    # V5.1: INTEGRACION OPENCODE (CLI) - sesiones paralelas desde opencode.db
+    # ========================================================================
+
+    OPENCODE_TEXT_CAP = 12000    # chars por texto de part (substr server-side)
+    OPENCODE_PATH_CAP = 300      # chars por ruta de tool input
+    OPENCODE_PATCH_CAP = 2000    # chars del array files de un patch
+
+    @staticmethod
+    def _opencode_iso(ms) -> Optional[str]:
+        """epoch milisegundos -> ISO-8601 UTC comparable con timestamps Claude."""
+        if not ms:
+            return None
+        try:
+            return datetime.fromtimestamp(ms / 1000.0, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.') + \
+                '%03dZ' % (int(ms) % 1000)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _opencode_int(v) -> int:
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _opencode_float(v) -> float:
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _opencode_model_label(self, model_json: str, provider: str = '', model_id: str = '',
+                              variant: str = '') -> str:
+        """'provider/model' (con variant si existe) desde columnas/JSON de opencode.db."""
+        if model_json:
+            try:
+                mj = json.loads(model_json)
+                provider = provider or mj.get('providerID', '')
+                model_id = model_id or mj.get('id', '')
+                variant = variant or mj.get('variant', '')
+            except Exception:
+                pass
+        if not model_id:
+            return ''
+        label = f"{provider}/{model_id}" if provider else model_id
+        if variant and variant not in ('default', ''):
+            label += f" ({variant})"
+        return label
+
+    def _query_opencode_sessions(self, con) -> Dict[str, Dict]:
+        cur = con.cursor()
+        sessions = {}
+        order = []
+        try:
+            rows = cur.execute("""
+                SELECT s.id, s.title, s.directory, s.parent_id, s.agent, s.model,
+                       s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning,
+                       s.tokens_cache_read, s.tokens_cache_write,
+                       s.time_created, s.time_updated, p.worktree
+                FROM session s LEFT JOIN project p ON p.id = s.project_id
+                ORDER BY s.time_created, s.id
+            """)
+        except sqlite3.Error as e:
+            print(f"  WARN: schema de opencode.db no reconocido: {e}")
+            return sessions
+        for r in rows:
+            (sid, title, directory, parent_id, agent, model_json,
+             cost, t_in, t_out, t_re, t_cr, t_cw, tc, tu, worktree) = r
+            sessions[sid] = {
+                'session_id': sid,
+                'file': f"opencode.db:{sid}",
+                'title': title or '',
+                'cwd': directory or '',
+                'worktree': '' if (worktree or '/') == '/' else (worktree or ''),
+                'parent_id': parent_id or '',
+                'subagent': bool(parent_id),
+                'agent': agent or '',
+                'model': self._opencode_model_label(model_json or ''),
+                'start_time': self._opencode_iso(tc),
+                'end_time': self._opencode_iso(tu),
+                'models_used': {},
+                'model_usage': {},
+                'qa_pairs': [],
+                'tool_calls': {},
+                'external_paths': set(),
+                'errors': 0,
+                'messages': [],   # [(msg_id, role, ts_iso, model_label)]
+                'usage': {
+                    'input': self._opencode_int(t_in),
+                    'output': self._opencode_int(t_out),
+                    'reasoning': self._opencode_int(t_re),
+                    'cache_read': self._opencode_int(t_cr),
+                    'cache_write': self._opencode_int(t_cw),
+                    'total': self._opencode_int(t_in) + self._opencode_int(t_out) +
+                             self._opencode_int(t_re),
+                    'cost': self._opencode_float(cost),
+                },
+                'project': None,
+                'match_rule': None,
+                'match_score': 0,
+            }
+            order.append(sid)
+        return {sid: sessions[sid] for sid in order}
+
+    def _query_opencode_messages(self, con, sessions: Dict[str, Dict]):
+        """Usage por modelo + cronologia de mensajes. Nunca se lee data crudo:
+        json_extract server-side (el data de un user puede medir decenas de MB)."""
+        cur = con.cursor()
+        try:
+            rows = cur.execute("""
+                SELECT session_id, id,
+                       json_extract(data,'$.role'),
+                       json_extract(data,'$.modelID'),
+                       json_extract(data,'$.providerID'),
+                       json_extract(data,'$.variant'),
+                       json_extract(data,'$.cost'),
+                       json_extract(data,'$.tokens.input'),
+                       json_extract(data,'$.tokens.output'),
+                       json_extract(data,'$.tokens.reasoning'),
+                       json_extract(data,'$.time.created'),
+                       CASE WHEN json_extract(data,'$.error') IS NOT NULL THEN 1 ELSE 0 END
+                FROM message
+                ORDER BY session_id, id
+            """)
+        except sqlite3.Error as e:
+            print(f"  WARN: tabla message no legible: {e}")
+            return
+        for r in rows:
+            (sid, mid, role, model_id, provider, variant,
+             cost, tok_in, tok_out, tok_re, ts_created, has_err) = r
+            s = sessions.get(sid)
+            if not s:
+                continue
+            ts = self._opencode_iso(ts_created) or s['start_time']
+            label = self._opencode_model_label('', provider or '', model_id or '',
+                                               variant or '')
+            if role == 'assistant':
+                if label:
+                    s['models_used'][label] = s['models_used'].get(label, 0) + 1
+                    mu = s['model_usage'].setdefault(label, {
+                        'input': 0, 'output': 0, 'reasoning': 0,
+                        'total': 0, 'cost': 0.0, 'requests': 0})
+                    mu['input'] += self._opencode_int(tok_in)
+                    mu['output'] += self._opencode_int(tok_out)
+                    mu['reasoning'] += self._opencode_int(tok_re)
+                    mu['total'] += (self._opencode_int(tok_in) + self._opencode_int(tok_out) +
+                                    self._opencode_int(tok_re))
+                    mu['cost'] += self._opencode_float(cost)
+                    mu['requests'] += 1
+                if has_err:
+                    s['errors'] += 1
+                s['messages'].append((mid, 'assistant', ts, label))
+            elif role == 'user':
+                s['messages'].append((mid, 'user', ts, ''))
+
+    def _query_opencode_parts(self, con, sessions: Dict[str, Dict]):
+        """Textos (Q&A), tools y rutas. state.output y summary.diffs NUNCA se
+        seleccionan: caps con substr/json_extract server-side."""
+        cur = con.cursor()
+        try:
+            rows = cur.execute("""
+                SELECT session_id, message_id,
+                       json_extract(data,'$.type'),
+                       substr(json_extract(data,'$.text'), 1, ?),
+                       json_extract(data,'$.synthetic'),
+                       json_extract(data,'$.tool'),
+                       json_extract(data,'$.state.status'),
+                       substr(json_extract(data,'$.state.input.filePath'), 1, ?),
+                       substr(json_extract(data,'$.state.input.path'), 1, ?),
+                       substr(json_extract(data,'$.state.input.command'), 1, 120),
+                       substr(json_extract(data,'$.files'), 1, ?),
+                       substr(json_extract(data,'$.url'), 1, ?)
+                FROM part
+                ORDER BY session_id, message_id, id
+            """, (self.OPENCODE_TEXT_CAP, self.OPENCODE_PATH_CAP,
+                  self.OPENCODE_PATH_CAP, self.OPENCODE_PATCH_CAP,
+                  self.OPENCODE_PATH_CAP))
+        except sqlite3.Error as e:
+            print(f"  WARN: tabla part no legible: {e}")
+            return
+        msg_text = {}          # {msg_id: [texts]} (rol se clasifica despues)
+        for r in rows:
+            (sid, mid, ptype, text, synthetic, tool, status,
+             in_fp, in_path, in_cmd, files_frag, url) = r
+            s = sessions.get(sid)
+            if not s:
+                continue
+            if ptype == 'text':
+                if synthetic:
+                    continue  # contexto inyectado (AGENTS.md, etc.)
+                t = (text or '').strip()
+                if t:
+                    msg_text.setdefault(mid, []).append(t)
+            elif ptype == 'tool':
+                name = tool or '?'
+                s['tool_calls'][name] = s['tool_calls'].get(name, 0) + 1
+                for p in (in_fp, in_path):
+                    if p and '/' in p:
+                        s['external_paths'].add(p)
+                if in_cmd:
+                    self._extract_paths_from_text(in_cmd, s['external_paths'])
+                if files_frag:
+                    self._extract_paths_from_text(files_frag, s['external_paths'])
+                if url and url.startswith('file://'):
+                    s['external_paths'].add(url[len('file://'):])
+            elif ptype == 'patch' and files_frag:
+                self._extract_paths_from_text(files_frag, s['external_paths'])
+        # segunda pasada ligera: clasificar textos por rol del mensaje
+        role_by_msg = {}
+        for s in sessions.values():
+            for mid, role, ts, _label in s['messages']:
+                role_by_msg[mid] = (s['session_id'], role, ts)
+        per_session_texts = {}  # {sid: [(mid, role, ts, text)]}
+        for mid, texts in msg_text.items():
+            info = role_by_msg.get(mid)
+            if not info:
+                continue
+            sid, role, ts = info
+            joined = '\n\n'.join(texts)
+            self._extract_paths_from_text(joined, sessions[sid]['external_paths'])
+            per_session_texts.setdefault(sid, []).append((mid, role, ts, joined))
+        for sid, items in per_session_texts.items():
+            items.sort(key=lambda x: x[0])  # msg id cronologico
+            pending = None       # (text, ts)
+            buf = []             # textos assistant del turno
+            buf_ts = None
+            for _mid, role, ts, text in items:
+                if role == 'user':
+                    if pending:
+                        sessions[sid]['qa_pairs'].append({
+                            'user': pending[0], 'assistant': '\n\n'.join(buf),
+                            'ts_user': pending[1], 'ts_assistant': buf_ts})
+                    pending = (text[:8000], ts)
+                    buf, buf_ts = [], None
+                elif role == 'assistant':
+                    if text:
+                        buf.append(text)
+                        buf_ts = buf_ts or ts
+            if pending:
+                sessions[sid]['qa_pairs'].append({
+                    'user': pending[0], 'assistant': '\n\n'.join(buf),
+                    'ts_user': pending[1], 'ts_assistant': buf_ts})
+
+    def _match_opencode_project(self, session: Dict[str, Any]):
+        """Adjudica proyecto Claude a una sesion OpenCode.
+        Regla 1: prefijo con contencion real sobre session.directory
+        (project.worktree solo si el cwd viene vacio).
+        Regla 2: votacion por rutas reales (patches, tool inputs, adjuntos).
+        Regla 3: desempate temporal con mensajes Claude."""
+        proj, score = self._best_project_match(session.get('cwd', ''),
+                                               projects=self.opencode_projects)
+        if proj:
+            return proj, 'cwd', score
+        # refuerzo: worktree del proyecto OpenCode solo si el cwd no aporta nada
+        wt = session.get('worktree')
+        if wt and not session.get('cwd'):
+            proj, score = self._best_project_match(wt, projects=self.opencode_projects)
+            if proj:
+                return proj, 'worktree', score
+
+        votes = {}
+        for p in session.get('external_paths', []):
+            cand, sc = self._best_project_match(p, projects=self.opencode_projects)
+            if cand and sc > votes.get(cand, 0):
+                votes[cand] = sc
+        if votes:
+            best = max(votes, key=votes.get)
+            if list(votes.values()).count(votes[best]) == 1:
+                return best, 'paths', votes[best]
+
+        start = session.get('start_time')
+        end = session.get('end_time')
+        if start and end:
+            overlap = {}
+            for msg in self.user_messages + self.assistant_responses:
+                c = msg.get('cwd', '')
+                ts = msg.get('timestamp', '')
+                if c and ts and not (end < ts or start > ts):
+                    overlap[c] = overlap.get(c, 0) + 1
+            if overlap:
+                best_cwd = max(overlap, key=overlap.get)
+                proj, sc = self._best_project_match(best_cwd, min_common=0,
+                                                    projects=self.opencode_projects)
+                if proj:
+                    return proj, 'tiempo', sc
+
+        return None, None, 0
+
+    def _load_opencode_sessions(self, opencode_dir: str):
+        """Carga sesiones OpenCode desde opencode.db (SQLite read-only)."""
+        base = Path(opencode_dir).expanduser().resolve()
+        db_path = base if base.suffix == '.db' else base / 'opencode.db'
+        if not db_path.exists():
+            print(f"  WARN: {db_path} no encontrado")
+            return
+
+        self.opencode_projects = self._collect_claude_project_cwds()
+        try:
+            con = sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True)
+        except sqlite3.Error as e:
+            print(f"  WARN: no se pudo abrir {db_path.name}: {e}")
+            return
+
+        sessions = {}
+        try:
+            sessions = self._query_opencode_sessions(con)
+            if not sessions:
+                print("  No hay sesiones en la base")
+                return
+            self._query_opencode_messages(con, sessions)
+            self._query_opencode_parts(con, sessions)
+        except sqlite3.Error as e:
+            print(f"  WARN: error leyendo {db_path.name}: {e}")
+            return
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+        print(f"  Sesiones OpenCode encontradas: {len(sessions)} | proyectos Claude: "
+              f"{len(self.opencode_projects)}")
+
+        for s in sessions.values():
+            s['external_paths'] = {p for p in s['external_paths']
+                                   if len(self._path_segments(p)) >= 3}
+            proj, rule, score = self._match_opencode_project(s)
+            s['project'], s['match_rule'], s['match_score'] = proj, rule, score
+            s.pop('messages', None)   # temporizador del parseo
+            self.opencode_sessions.append(s)
+
+        matched = sum(1 for s in self.opencode_sessions if s['project'])
+        subs = sum(1 for s in self.opencode_sessions if s['subagent'])
+        print(f"  Sesiones OpenCode parseadas: {len(self.opencode_sessions)} "
+              f"(con proyecto Claude: {matched}, sin proyecto: {len(self.opencode_sessions) - matched}, "
+              f"sub-agentes: {subs})")
+
+
+    # ========================================================================
     # GENERACION DE REPORTES
     # ========================================================================
 
@@ -1735,6 +2091,11 @@ class SessionProcessor:
         if self.pencil_sessions:
             self._generate_pencil_report()
             self._generate_pencil_models_report()
+
+        # v5.1: Reportes OpenCode
+        if self.opencode_sessions:
+            self._generate_opencode_report()
+            self._generate_opencode_models_report()
 
         print(f"Reportes generados exitosamente en {self.output_dir}")
         print(f"{len(os.listdir(self.output_dir))} archivos creados")
@@ -2653,6 +3014,27 @@ class SessionProcessor:
             content.append(f"| Costo por turno | ${(p_cost / p_turns) if p_turns else 0:.4f} |\n")
             content.append("\n*Detalle por modelo en `13_pencil_modelos_uso.md`.*\n")
 
+        # v5.1: Consumo OpenCode (CLI)
+        if self.opencode_sessions:
+            content.append("\n---\n\n")
+            content.append("## Consumo OpenCode (CLI)\n\n")
+            o_input = sum(s['usage']['input'] for s in self.opencode_sessions)
+            o_output = sum(s['usage']['output'] for s in self.opencode_sessions)
+            o_reason = sum(s['usage']['reasoning'] for s in self.opencode_sessions)
+            o_total = sum(s['usage']['total'] for s in self.opencode_sessions)
+            o_cost = sum(s['usage']['cost'] for s in self.opencode_sessions)
+            o_turns = sum(len(s['qa_pairs']) for s in self.opencode_sessions if not s['subagent'])
+            content.append(f"| Concepto | Valor |\n|----------|------:|\n")
+            content.append(f"| Sesiones | {len(self.opencode_sessions)} |\n")
+            content.append(f"| Turnos Q&A (sesiones raiz) | {o_turns} |\n")
+            content.append(f"| Input tokens | {o_input:,} |\n")
+            content.append(f"| Output tokens | {o_output:,} |\n")
+            content.append(f"| Reasoning tokens | {o_reason:,} |\n")
+            content.append(f"| **Total tokens** | **{o_total:,}** |\n")
+            content.append(f"| **Costo reportado** | **${o_cost:.4f}** |\n")
+            content.append(f"| Costo por turno | ${(o_cost / o_turns) if o_turns else 0:.4f} |\n")
+            content.append("\n*Detalle por modelo en `15_opencode_modelos_uso.md`.*\n")
+
         full_content = ''.join(content)
         self._split_large_file(output_file, full_content)
         print(f"  Reporte de eficiencia generado: {output_file.name}")
@@ -3488,6 +3870,196 @@ class SessionProcessor:
         self._split_large_file(output_file, full_content)
         print(f"  Reporte modelos Pencil generado: {output_file.name}")
 
+    # ========================================================================
+    # V5.1: REPORTES OPENCODE
+    # ========================================================================
+
+    def _generate_opencode_report(self):
+        """Sesiones OpenCode agrupadas por proyecto Claude: cronologia, reglas de
+        matching y Q&A de las sesiones raiz (los sub-agentes se listan aparte)."""
+        output_file = self.output_dir / "14_opencode_sesiones.md"
+
+        matched = {}
+        unmatched = []
+        for s in self.opencode_sessions:
+            if s['project']:
+                matched.setdefault(s['project'], []).append(s)
+            else:
+                unmatched.append(s)
+
+        content = []
+        content.append("# Sesiones de OpenCode (CLI)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        rules = {}
+        for s in self.opencode_sessions:
+            if s['match_rule']:
+                rules[s['match_rule']] = rules.get(s['match_rule'], 0) + 1
+        content.append(f"- Sesiones procesadas: **{len(self.opencode_sessions)}** "
+                       f"(sub-agentes: {sum(1 for s in self.opencode_sessions if s['subagent'])})\n")
+        content.append("- Vinculadas a un proyecto Claude: **{}** ({}: {}, paths: {}, tiempo: {})\n".format(
+            sum(len(v) for v in matched.values()),
+            'cwd/worktree',
+            rules.get('cwd', 0) + rules.get('worktree', 0),
+            rules.get('paths', 0), rules.get('tiempo', 0)))
+        content.append(f"- Sin proyecto identificable: **{len(unmatched)}**\n\n")
+
+        def render_session(s):
+            name = s['title'] or s['session_id']
+            kind = " *(sub-agente)*" if s['subagent'] else ""
+            content.append(f"### {name}{kind}\n\n")
+            content.append(f"- **ID:** `{s['session_id']}` | **Agente:** {s['agent'] or '?'}"
+                           f" | **Modelo:** {s['model'] or '?'}\n")
+            content.append(f"- **Periodo:** {self._format_timestamp(s['start_time'] or '')} -> "
+                           f"{self._format_timestamp(s['end_time'] or '')}"
+                           f" ({self._calculate_interaction_duration(s['start_time'] or '', s['end_time'] or '') or 'N/A'})\n")
+            content.append(f"- **CWD (OpenCode):** `{s['cwd'] or '?'}`"
+                           + (f" | **Worktree:** `{s['worktree']}`" if s['worktree'] else "") + "\n")
+            if s['project']:
+                content.append(f"- **Proyecto Claude:** `{Path(s['project']).name}` "
+                               f"(regla: `{s['match_rule']}`, prefijo: {s['match_score']})\n")
+            if s['models_used']:
+                models = ', '.join(f"{m} ({c})" for m, c in
+                                   sorted(s['models_used'].items(), key=lambda x: -x[1]))
+                content.append(f"- **Modelos (requests assistant):** {models}\n")
+            u = s['usage']
+            content.append(f"- **Tokens:** {u['total']:,} (in {u['input']:,} / out {u['output']:,} / "
+                           f"reasoning {u['reasoning']:,} / cache r-w {u['cache_read']:,}/{u['cache_write']:,}) "
+                           f"| **Costo:** ${u['cost']:.4f}\n")
+            if s['errors']:
+                content.append(f"- **Mensajes con error:** {s['errors']}\n")
+            if s['tool_calls']:
+                tools = ', '.join(f"{t} ({c})" for t, c in
+                                  sorted(s['tool_calls'].items(), key=lambda x: -x[1])[:12])
+                content.append(f"- **Tools:** {tools}\n")
+            if s['subagent']:
+                first_user = s['qa_pairs'][0]['user'] if s['qa_pairs'] else ''
+                content.append(f"- **Turno:** {first_user[:300]}\n\n")
+                return
+            content.append(f"- **Turnos Q&A:** {len(s['qa_pairs'])}\n\n")
+
+            for i, qa in enumerate(s['qa_pairs'], 1):
+                ts = self._format_timestamp(qa.get('ts_user') or '')
+                content.append(f"#### [{i}] Usuario ({ts}):\n\n")
+                ut = qa['user']
+                if len(ut) > 8000:
+                    content.append(ut[:8000] + f"\n\n_[... truncado ...]_\n\n")
+                else:
+                    content.append(ut + "\n\n")
+                at = qa['assistant']
+                if at:
+                    content.append("**Agente:**\n\n")
+                    if len(at) > 12000:
+                        content.append(at[:12000] + f"\n\n_[... truncado ...]_\n\n")
+                    else:
+                        content.append(at + "\n\n")
+                else:
+                    content.append("**Agente:** _(sin respuesta de texto; solo operaciones)_\n\n")
+
+        for proj in sorted(matched, key=lambda p: -len(matched[p])):
+            sess = sorted(matched[proj], key=lambda s: s['start_time'] or '')
+            tot_tokens = sum(s['usage']['total'] for s in sess)
+            tot_cost = sum(s['usage']['cost'] for s in sess)
+            content.append("---\n\n")
+            content.append(f"## Proyecto: `{Path(proj).name}`\n\n")
+            content.append(f"- **Ruta Claude:** `{proj}`\n")
+            content.append(f"- **Sesiones OpenCode:** {len(sess)} | "
+                           f"**Total tokens:** {tot_tokens:,} | **Total costo:** ${tot_cost:.4f}\n\n")
+            content.append("**Cronologia:** " + '; '.join(
+                f"{(s['start_time'] or '')[:10]} {(s['title'] or s['session_id'])[:24]}"
+                + ("*" if s['subagent'] else "") for s in sess) + "\n")
+            content.append("*\\* sub-agente (sesión hija de un `task`).*\n\n")
+
+            for s in sess:
+                render_session(s)
+
+        if unmatched:
+            content.append("---\n\n")
+            content.append("## Sin proyecto identificable\n\n")
+            content.append("*Sesiones cuyo cwd/paths no coinciden con ningun proyecto Claude "
+                           "analizado (otros repos, sesion global, etc.).*\n\n")
+            for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
+                render_session(s)
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte sesiones OpenCode generado: {output_file.name}")
+
+    def _generate_opencode_models_report(self):
+        """Uso de modelos OpenCode: tokens, costo, requests, tasa de turnos con
+        respuesta de texto y distribucion de herramientas."""
+        output_file = self.output_dir / "15_opencode_modelos_uso.md"
+
+        agg = {}
+        tools = {}
+        for s in self.opencode_sessions:
+            for model, mu in s['model_usage'].items():
+                a = agg.setdefault(model, {
+                    'input': 0, 'output': 0, 'reasoning': 0, 'total': 0, 'cost': 0.0,
+                    'requests': 0, 'sessions': set(), 'turns': 0, 'answered_turns': 0})
+                a['input'] += mu['input']
+                a['output'] += mu['output']
+                a['reasoning'] += mu['reasoning']
+                a['total'] += mu['total']
+                a['cost'] += mu['cost']
+                a['requests'] += mu['requests']
+                a['sessions'].add(s['session_id'])
+            for t, c in s['tool_calls'].items():
+                tools[t] = tools.get(t, 0) + c
+            qas = s['qa_pairs']
+            dominant = max(s['model_usage'], key=lambda m: s['model_usage'][m]['requests']) \
+                if s['model_usage'] else ''
+            if dominant and dominant in agg and not s['subagent']:
+                agg[dominant]['turns'] += len(qas)
+                agg[dominant]['answered_turns'] += sum(1 for q in qas if q['assistant'])
+
+        content = []
+        content.append("# Uso de Modelos en OpenCode (CLI)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append("*Costo por turno, tokens reasoning y tasa de turnos con respuesta "
+                       "textual, por modelo. Incluye sesiones de sub-agentes.*\n\n")
+
+        content.append("| Modelo | Sesiones | Requests | Tokens totales | Output | Reasoning | Costo (USD) | $/turno | T. con respuesta |\n")
+        content.append("|--------|---------:|---------:|--------------:|-------:|----------:|------------:|--------:|----------------:|\n")
+        for model, a in sorted(agg.items(), key=lambda x: -x[1]['cost']):
+            cost_per_turn = a['cost'] / a['turns'] if a['turns'] else 0
+            ans_rate = (a['answered_turns'] / a['turns'] * 100) if a['turns'] else None
+            ans_str = f"{ans_rate:.0f}%" if ans_rate is not None else "—"
+            content.append(
+                f"| {model} | {len(a['sessions'])} | {a['requests']:,} | {a['total']:,} "
+                f"| {a['output']:,} | {a['reasoning']:,} | ${a['cost']:.4f} "
+                f"| ${cost_per_turn:.4f} | {ans_str} |\n")
+
+        tot_cost = sum(a['cost'] for a in agg.values())
+        tot_tokens = sum(a['total'] for a in agg.values())
+        content.append(f"\n**Total OpenCode:** {tot_tokens:,} tokens | costo ${tot_cost:.4f} | "
+                       f"{sum(a['requests'] for a in agg.values()):,} requests API\n\n")
+
+        if tools:
+            content.append("---\n\n## Herramientas mas usadas\n\n")
+            content.append("| Tool | Llamadas |\n|------|---------:|\n")
+            for t, c in sorted(tools.items(), key=lambda x: -x[1])[:30]:
+                content.append(f"| `{t}` | {c:,} |\n")
+            content.append("\n")
+
+        content.append("---\n\n## Desglose por sesion\n\n")
+        content.append("| Sesion | Titulo | Proyecto | Agente | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
+        content.append("|--------|--------|----------|--------|-------------------------|-------:|-------:|------:|\n")
+        for s in sorted(self.opencode_sessions, key=lambda s: s['start_time'] or ''):
+            top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['cost'])[:2]
+            models_str = ', '.join(m for m, _ in top_models) or '—'
+            proj = Path(s['project']).name if s['project'] else '—'
+            title = (s['title'] or s['session_id'])[:40].replace('|', '/')
+            if s['subagent']:
+                title += ' *'
+            content.append(
+                f"| `{s['session_id'][:16]}...` | {title} | {proj} | {s['agent'] or '—'} "
+                f"| {models_str} | {len(s['qa_pairs'])} "
+                f"| {s['usage']['total']:,} | ${s['usage']['cost']:.4f} |\n")
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte modelos OpenCode generado: {output_file.name}")
+
     def _split_large_file(self, file_path: Path, content: str, max_size_mb: int = 2):
         """Divide archivos grandes en multiples partes si superan el tamano maximo"""
         max_size_bytes = max_size_mb * 1024 * 1024
@@ -3564,7 +4136,7 @@ class SessionProcessor:
     # ENTRADA PRINCIPAL
     # ========================================================================
 
-    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None):
+    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None, opencode_dir=None):
         """Procesa todos los archivos JSONL en el directorio o el archivo indicado"""
         if self.input_file:
             jsonl_files = [self.input_file]
@@ -3606,8 +4178,14 @@ class SessionProcessor:
                 print(f"\nCargando sesiones de Pencil desde {pencil_dir}...")
                 self._load_pencil_sessions(pencil_dir)
 
+            # v5.1: Cargar sesiones de OpenCode
+            if opencode_dir:
+                self.opencode_dir = opencode_dir
+                print(f"\nCargando sesiones de OpenCode desde {opencode_dir}...")
+                self._load_opencode_sessions(opencode_dir)
+
             if (self.subagent_data or self.memory_data or self.codex_matched
-                    or self.qwen_sessions or self.pencil_sessions):
+                    or self.qwen_sessions or self.pencil_sessions or self.opencode_sessions):
                 self.generate_reports()
             else:
                 print("No se encontraron datos para procesar.")
@@ -3659,6 +4237,12 @@ class SessionProcessor:
             print(f"\nCargando sesiones de Pencil desde {pencil_dir}...")
             self._load_pencil_sessions(pencil_dir)
 
+        # v5.1: Cargar sesiones de OpenCode
+        if opencode_dir:
+            self.opencode_dir = opencode_dir
+            print(f"\nCargando sesiones de OpenCode desde {opencode_dir}...")
+            self._load_opencode_sessions(opencode_dir)
+
         # Generar reportes
         self.generate_reports()
 
@@ -3672,7 +4256,7 @@ class SessionProcessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Procesar sesiones de Claude Code v5.0 (subagentes, memoria, integración Codex + Qwen + Pencil)',
+        description='Procesar sesiones de Claude Code v5.1 (subagentes, memoria, integración Codex + Qwen + Pencil + OpenCode)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
@@ -3682,13 +4266,14 @@ Ejemplos:
   python3 process_sessions.py . -o reportes --qwen-dir ~/.qwen/
   python3 process_sessions.py . -o reportes --codex-dir ~/.codex/ --qwen-dir ~/.qwen/
   python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
+  python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode/
   python3 process_sessions.py . --file-history CLAUDE.md
   python3 process_sessions.py . --no-subagents
         """
     )
     parser.add_argument('input_dir', nargs='?', default='.',
                         help='Directorio con archivos .jsonl o archivo individual (por defecto: \'.\')')
-    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.0.0')
+    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.1.0')
     parser.add_argument('-o', '--output', help='Directorio de salida para reportes')
     parser.add_argument('--last', type=int, help='Extraer las ultimas N conversaciones en un archivo separado')
     parser.add_argument('--file-history', help='Generar historial completo de modificaciones para un archivo especifico')
@@ -3700,6 +4285,8 @@ Ejemplos:
                         help='Directorio de Qwen CLI (~/.qwen/) para incluir sesiones paralelas')
     parser.add_argument('--pencil-dir',
                         help='Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño')
+    parser.add_argument('--opencode-dir',
+                        help='Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas')
 
     args = parser.parse_args()
 
@@ -3709,7 +4296,7 @@ Ejemplos:
         sys.exit(1)
 
     processor = SessionProcessor(args.input_dir, args.output)
-    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir)
+    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir, args.opencode_dir)
 
 
 if __name__ == "__main__":

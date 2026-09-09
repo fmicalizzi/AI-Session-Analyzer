@@ -269,5 +269,206 @@ class TestPencilIntegration(unittest.TestCase):
         self.assertIn("model-x", c13)
 
 
+def _has_json1():
+    import sqlite3
+    try:
+        con = sqlite3.connect(":memory:")
+        con.execute("SELECT json_extract('{\"a\":1}','$.a')").fetchone()
+        con.close()
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_has_json1(), "sqlite3 sin soporte JSON1")
+class TestOpenCodeIntegration(unittest.TestCase):
+    """Fixture: opencode.db sintetico con la estructura session->message->part."""
+
+    def setUp(self):
+        import sqlite3
+        self.temp_dir = tempfile.mkdtemp()
+        self.input_dir = Path(self.temp_dir) / "sessions"
+        self.output_dir = Path(self.temp_dir) / "reports"
+        self.input_dir.mkdir(parents=True)
+        self.opencode_dir = Path(self.temp_dir) / ".local/share/opencode"
+        self.opencode_dir.mkdir(parents=True)
+        self.db_path = self.opencode_dir / "opencode.db"
+
+        def ms(h, m, s=0):
+            # 2026-09-08T{h}:{m}:{s} UTC en epoch milisegundos
+            from datetime import datetime, timezone
+            return int(datetime(2026, 9, 8, h, m, s, tzinfo=timezone.utc).timestamp() * 1000)
+
+        self.ms_start, self.ms_mid, self.ms_end = ms(10, 0), ms(10, 1), ms(10, 2)
+
+        con = sqlite3.connect(str(self.db_path))
+        con.executescript("""
+            CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+            CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT,
+                slug TEXT, directory TEXT, title TEXT, agent TEXT, model TEXT,
+                cost REAL DEFAULT 0, tokens_input INTEGER DEFAULT 0,
+                tokens_output INTEGER DEFAULT 0, tokens_reasoning INTEGER DEFAULT 0,
+                tokens_cache_read INTEGER DEFAULT 0, tokens_cache_write INTEGER DEFAULT 0,
+                time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+                time_created INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                time_created INTEGER, data TEXT);
+        """)
+        con.execute("INSERT INTO project VALUES ('p1', '/Users/tester/dev/proj-app')")
+
+        # sesion A: cwd subcarpeta del proyecto (raiz)
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('sesA', 'p1', None, 'slug-a', '/Users/tester/dev/proj-app/sub',
+             'Hero azul', 'build',
+             '{"id":"model-x","providerID":"opencode-go","variant":"medium"}',
+             0.003, 10, 20, 5, 0, 0, self.ms_start, self.ms_end))
+        # sesion B: sub-agente de A
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('sesB', 'p1', 'sesA', 'slug-b', '/Users/tester/dev/proj-app/sub',
+             'explore tareas', 'explore',
+             '{"id":"model-x","providerID":"opencode-go"}',
+             0.001, 1, 2, 0, 0, 0, self.ms_mid, self.ms_mid + 1000))
+        # sesion C: cwd fuera de todo proyecto, peros paths reales del proyecto
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('sesC', 'p1', None, 'slug-c', '/Users/tester/.opencode-cache/uuid-9',
+             'Parche suelto', 'build', '', 0.001, 3, 4, 0, 0, 0,
+             self.ms_mid, self.ms_end))
+        # sesion D: sin cwd ni paths utiles -> solo tiempo
+        con.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('sesD', 'p1', None, 'slug-d', '/mnt/nada/xyz', 'Sin senales', 'build',
+             '', 0, 0, 0, 0, 0, 0, self.ms_start, self.ms_end))
+
+        msgs = [
+            ('msgA1', 'sesA', self.ms_start, {"role": "user", "time": {"created": self.ms_start}}),
+            ('msgA2', 'sesA', self.ms_mid, {"role": "assistant", "parentID": "msgA1",
+                "modelID": "model-x", "providerID": "opencode-go", "variant": "medium",
+                "cost": 0.003, "tokens": {"input": 10, "output": 20, "reasoning": 5},
+                "time": {"created": self.ms_mid}, "finish": "stop"}),
+            ('msgB1', 'sesB', self.ms_mid, {"role": "user", "time": {"created": self.ms_mid}}),
+            ('msgB2', 'sesB', self.ms_mid, {"role": "assistant", "parentID": "msgB1",
+                "modelID": "model-x", "providerID": "opencode-go", "cost": 0.001,
+                "tokens": {"input": 1, "output": 2},
+                "time": {"created": self.ms_mid},
+                "error": {"name": "MessageAbortedError"}}),
+            ('msgC1', 'sesC', self.ms_mid, {"role": "user", "time": {"created": self.ms_mid}}),
+            ('msgD1', 'sesD', self.ms_start, {"role": "user", "time": {"created": self.ms_start}}),
+        ]
+        con.executemany("INSERT INTO message VALUES (?,?,?,?)",
+                        [(i, s, t, json.dumps(d)) for i, s, t, d in msgs])
+        parts = [
+            ('prtA1', 'msgA1', 'sesA', json.dumps({"type": "text", "text": "pinta el hero de azul"})),
+            ('prtA2', 'msgA1', 'sesA', json.dumps({"type": "text", "synthetic": True,
+                "text": "<env>contexto inyectado AGENTS.md</env>"})),
+            ('prtA3', 'msgA2', 'sesA', json.dumps({"type": "tool", "tool": "edit",
+                "callID": "c1", "state": {"status": "completed", "input": {
+                    "filePath": "/Users/tester/dev/proj-app/src/App.tsx"},
+                    "output": "M" * 500000}})),
+            ('prtA4', 'msgA2', 'sesA', json.dumps({"type": "patch", "hash": "h",
+                "files": ["/Users/tester/dev/proj-app/src/App.tsx",
+                           "/Users/tester/dev/proj-app/README.md"]})),
+            ('prtA5', 'msgA2', 'sesA', json.dumps({"type": "text", "text": "Listo, hero azul."})),
+            ('prtA6', 'msgA2', 'sesA', json.dumps({"type": "reasoning", "text": "penando..."})),
+            ('prtB1', 'msgB1', 'sesB', json.dumps({"type": "text", "text": "busca los endpoints"})),
+            ('prtC1', 'msgC1', 'sesC', json.dumps({"type": "tool", "tool": "write",
+                "callID": "c9", "state": {"status": "completed", "input": {
+                    "filePath": "/Users/tester/dev/proj-app/docs/parche.md"},
+                    "output": "ok"}})),
+        ]
+        con.executemany("INSERT INTO part (id, message_id, session_id, data) VALUES (?,?,?,?)",
+                        parts)
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _processor(self):
+        sp = SessionProcessor(str(self.input_dir), str(self.output_dir))
+        sp.user_messages.append({"cwd": "/Users/tester/dev/proj-app",
+                                 "timestamp": "2026-09-08T10:00:00.000Z"})
+        sp.assistant_responses.append({"cwd": "/Users/tester/dev/proj-app",
+                                       "timestamp": "2026-09-08T10:01:30.000Z"})
+        return sp
+
+    def _load(self):
+        sp = self._processor()
+        sp._load_opencode_sessions(str(self.opencode_dir))
+        return sp
+
+    def test_parse_by_cwd_and_usage(self):
+        sp = self._load()
+        by_id = {s['session_id']: s for s in sp.opencode_sessions}
+        a = by_id['sesA']
+        self.assertEqual(a['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(a['match_rule'], 'cwd')
+        self.assertFalse(a['subagent'])
+        self.assertEqual(a['title'], 'Hero azul')
+        self.assertEqual(a['model'], 'opencode-go/model-x (medium)')
+        # uso rollup desde columnas de session
+        self.assertEqual(a['usage']['input'], 10)
+        self.assertEqual(a['usage']['output'], 20)
+        self.assertEqual(a['usage']['total'], 35)
+        self.assertAlmostEqual(a['usage']['cost'], 0.003)
+        # uso por modelo desde mensajes assistant
+        self.assertEqual(a['models_used'], {'opencode-go/model-x (medium)': 1})
+        self.assertEqual(a['model_usage']['opencode-go/model-x (medium)']['requests'], 1)
+        # Q&A: prompt limpio (el synthetic se descarta) + respuesta
+        self.assertEqual(len(a['qa_pairs']), 1)
+        self.assertEqual(a['qa_pairs'][0]['user'], 'pinta el hero de azul')
+        self.assertEqual(a['qa_pairs'][0]['assistant'], 'Listo, hero azul.')
+        self.assertEqual(a['tool_calls'], {'edit': 1})
+        self.assertIn('/Users/tester/dev/proj-app/src/App.tsx', a['external_paths'])
+        self.assertIn('/Users/tester/dev/proj-app/README.md', a['external_paths'])
+
+    def test_subagent_flag_and_errors(self):
+        by_id = {s['session_id']: s for s in self._load().opencode_sessions}
+        b = by_id['sesB']
+        self.assertTrue(b['subagent'])
+        self.assertEqual(b['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(b['errors'], 1)
+        self.assertEqual(b['qa_pairs'][0]['user'], 'busca los endpoints')
+
+    def test_match_rule_paths_fallback(self):
+        by_id = {s['session_id']: s for s in self._load().opencode_sessions}
+        c = by_id['sesC']
+        self.assertEqual(c['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(c['match_rule'], 'paths')
+
+    def test_match_rule_tiempo_fallback(self):
+        by_id = {s['session_id']: s for s in self._load().opencode_sessions}
+        d = by_id['sesD']
+        self.assertEqual(d['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(d['match_rule'], 'tiempo')
+
+    def test_opencode_reports_generated(self):
+        sp = self._load()
+        sp._generate_opencode_report()
+        sp._generate_opencode_models_report()
+        r14 = self.output_dir / "14_opencode_sesiones.md"
+        r15 = self.output_dir / "15_opencode_modelos_uso.md"
+        self.assertTrue(r14.exists())
+        self.assertTrue(r15.exists())
+        c14 = r14.read_text(encoding="utf-8")
+        self.assertIn("pinta el hero de azul", c14)
+        self.assertIn("Listo, hero azul.", c14)
+        self.assertNotIn("contexto inyectado", c14)
+        self.assertIn("sub-agente", c14)
+        self.assertIn("regla: `cwd`", c14)
+        c15 = r15.read_text(encoding="utf-8")
+        self.assertIn("opencode-go/model-x", c15)
+        self.assertIn("`edit`", c15)
+
+    def test_missing_db_degrades_quietly(self):
+        sp = self._processor()
+        sp._load_opencode_sessions(str(Path(self.temp_dir) / "inexistente"))
+        self.assertEqual(sp.opencode_sessions, [])
+
+
 if __name__ == "__main__":
     unittest.main()
+

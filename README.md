@@ -4,11 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Dependencies: Stdlib Only](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-brightgreen.svg)](requirements.txt)
 
-Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
+Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
 
 ## Descripcion
 
-Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen y sesiones de diseño de Pencil (pen.dev) sobre los mismos proyectos. Genera reportes detallados que incluyen:
+Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen, sesiones de diseño de Pencil (pen.dev) y sesiones de OpenCode CLI sobre los mismos proyectos. Genera reportes detallados que incluyen:
 - Historico de mensajes del usuario
 - Respuestas del sistema
 - Pares de preguntas y respuestas
@@ -21,6 +21,7 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 - **v4.0:** Integracion con Codex CLI (GPT-5.4) — detecta delegaciones, matchea sesiones, enriquece reportes
 - **v4.1:** Integracion con Qwen CLI — visibilidad de actividad paralela en el mismo proyecto
 - **v5.0:** Integracion con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicacion inteligente al proyecto Claude (cwd/.pen/timestamps) + estadisticas por modelo
+- **v5.1 (Actual):** Integracion con OpenCode CLI — sesiones paralelas leidas de `opencode.db` (SQLite), Q&A + tokens/costo por modelo y adjudicacion al proyecto Claude (cwd/paths/timestamps)
 
 ## Instalacion
 
@@ -103,6 +104,12 @@ python3 process_sessions.py . -o reportes --codex-dir ~/.codex/ --qwen-dir ~/.qw
 python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
 ```
 
+### Funcionalidades v5.1 (Integracion OpenCode)
+```bash
+# Incluir sesiones paralelas de OpenCode CLI (opencode.db), adjudicadas al proyecto Claude
+python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode/
+```
+
 ### Ver todas las opciones
 ```bash
 python3 process_sessions.py --help
@@ -141,6 +148,8 @@ tu-proyecto/
     ├── 11_qwen_paralelo.md               # v4.1 (con --qwen-dir)
     ├── 12_pencil_sesiones_diseno.md      # v5.0 (con --pencil-dir)
     ├── 13_pencil_modelos_uso.md          # v5.0 (con --pencil-dir)
+    ├── 14_opencode_sesiones.md           # v5.1 (con --opencode-dir)
+    ├── 15_opencode_modelos_uso.md        # v5.1 (con --opencode-dir)
     ├── log_operaciones_archivos.md
     ├── ultimas_N_conversaciones.md       (opcional con --last)
     └── historial_ARCHIVO.md              (opcional con --file-history)
@@ -175,6 +184,23 @@ Ver `CODEX_DATA_GUIDE.md` para documentacion detallada del formato.
     └── {uuid}.json                  # Desktop: titulo + vinculo sessionId -> .jsonl
 ```
 Ver `PENCIL_DATA_GUIDE.md` para el formato y el algoritmo de adjudicacion.
+
+### Datos de OpenCode (fuente externa, v5.1)
+```
+~/.local/share/opencode/             # Directorio de datos de OpenCode (--opencode-dir)
+└── opencode.db                      # SQLite (WAL): session -> message -> part
+```
+
+| Tabla | Contenido |
+|-------|-----------|
+| `session` | `directory` (cwd), `title`, `parent_id` (sub-agentes), rollup de `cost`/`tokens_*` |
+| `message` | `data` JSON: role user/assistant con `modelID`, `providerID`, `cost`, `tokens` |
+| `part` | `data` JSON: `text` (con flag `synthetic` a filtrar), `tool`, `patch`, `file` |
+| `project` | `worktree` (raiz del repo) por `project_id` |
+
+Se abre **read-only** y todo se extrae con `json_extract` + `substr` server-side:
+los `data` crudos pueden medir decenas de MB (`summary.diffs`, `tool.state.output`)
+y nunca se cargan. Ver `OPENCODE_DATA_GUIDE.md` para el detalle.
 
 ## Reportes Generados
 
@@ -321,18 +347,50 @@ Util para:
 - Validar con que modelo rinde mejor el trabajo de diseno y con cual continuar
 - Comparar costo/eficiencia entre modelos en el mismo flujo
 
-### 15. Log de Operaciones CSV (`log_operaciones_archivos.md`)
+### 15. Sesiones OpenCode (`14_opencode_sesiones.md`) - v5.1
+**Nuevo en v5.1! Requiere `--opencode-dir`**
+
+Sesiones de OpenCode CLI agrupadas por el proyecto Claude al que pertenecen:
+- **Adjudicacion inteligente** en 3 reglas auditables (cada sesion reporta cual la gano):
+  1. `cwd` — prefijo comun con contencion real sobre `session.directory` (funciona con subcarpetas)
+  2. `paths` — votacion por rutas de archivos reales (patches, tool inputs, adjuntos)
+  3. `tiempo` — desempate por solapamiento con actividad Claude
+- **Q&A recuperado:** prompt del usuario (descartando parts `synthetic`) + textos del
+  agente por turno, con timestamp
+- **Metadata por sesion:** titulo, agente, modelo+variant, tokens (in/out/reasoning/cache),
+  costo USD, tools usadas, errores (p.ej. abortos)
+- Las sesiones de **sub-agentes** (hijas de un `task`) se marcan y resumen sin Q&A completo
+- Seccion final "Sin proyecto identificable" para auditoria de sesiones sueltas
+
+Util para:
+- Reconstruir que se hizo con OpenCode en el mismo repo mientras Claude trabajaba
+- Auditar costo/tokens reales por sesion (rollup de la propia base de OpenCode)
+
+### 16. Uso de Modelos OpenCode (`15_opencode_modelos_uso.md`) - v5.1
+**Nuevo en v5.1! Requiere `--opencode-dir`**
+
+Estadisticas de uso por modelo (`provider/model (variant)`) en las sesiones OpenCode:
+- Tokens (input/output/reasoning), requests assistant y **costo real en USD** por modelo
+- **$/turno** de conversacion y **tasa de turnos con respuesta de texto**
+- Top 30 de herramientas usadas (incluye `invalid` = tool-calls erroneos del modelo)
+- Desglose por sesion con titulo, proyecto adjudicado, agente y modelo dominante
+
+Util para:
+- Comparar que modelo/variant rinde mejor (costo por turno y respuestas de texto)
+- Detectar sesiones abortadas o con errores por modelo
+
+### 17. Log de Operaciones CSV (`log_operaciones_archivos.md`)
 Log simple compatible con Excel/Google Sheets:
 - **Formato**: `Operacion;Ruta;Herramienta;Sesion;Timestamp;Origen`
 - v3.0: Columna `Origen` indica si es sesion principal o subagente
 - Importable: Usar `;` como separador en hojas de calculo
 
-### 16. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
+### 18. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
 **Generado con `--last N`**
 - Extrae las ultimas N conversaciones mas recientes
 - v3.0: Incluye subagentes vinculados a cada interaccion
 
-### 17. Historial de Archivo (`historial_ARCHIVO.md`)
+### 19. Historial de Archivo (`historial_ARCHIVO.md`)
 **Generado con `--file-history FILENAME`**
 - Timeline completo de modificaciones de un archivo especifico
 - v3.0: Incluye modificaciones hechas por subagentes
@@ -413,13 +471,34 @@ Con `--pencil-dir`, el script:
 
 Ver `PENCIL_DATA_GUIDE.md` para documentacion detallada del formato y el algoritmo de matching.
 
+## Integracion con OpenCode (v5.1)
+
+OpenCode es una CLI de agentes de codigo abierto. Al igual que Pencil, sus sesiones ocurren **en paralelo** a las de Claude sobre los mismos repos, pero su fuente de datos es una **base SQLite** (`~/.local/share/opencode/opencode.db`) con estructura `session → message → part`.
+
+Con `--opencode-dir`, el script:
+1. **Abre la base read-only** y extrae sesiones, mensajes y parts con `json_extract` + caps `substr` server-side (los `data` crudos llegan a medir 31 MB; nunca se cargan enteros)
+2. **Reconstruye el Q&A** por turno (parts `synthetic` = contexto inyectado, se descartan) y el **usage por modelo** desde los mensajes assistant; el total de tokens/costo sale del rollup de la propia tabla `session` (verificado: coincide exacto con la suma)
+3. **Adjudica cada sesion** al proyecto Claude por prefijo de cwd con contencion real → votacion por rutas de patches/tools/adjuntos → solapamiento temporal (reutiliza el matching de Pencil; cada sesion reporta la regla usada)
+4. **Distingue sub-agentes** (sesiones con `parent_id`, hijas de un `task`): se listan compactas, sin Q&A
+5. **Genera** `14_opencode_sesiones.md`, `15_opencode_modelos_uso.md` y seccion OpenCode en `09_eficiencia_tokens.md`
+
+### Formato de datos de OpenCode
+
+- `session.directory` = cwd de la sesion (clave del matching); `project.worktree` como refuerzo
+- `message.data` JSON segun rol: `user` (`summary.diffs` enorme — jamas seleccionar) / `assistant` (`modelID`, `providerID`, `cost`, `tokens`, `error` opcional)
+- `part.data` JSON: `text`/`tool`/`patch`/`file`; `state.output` de tools nunca se extrae
+- Relojes en epoch **milisegundos** → convertidos a ISO-UTC comparable con timestamps Claude
+
+Ver `OPENCODE_DATA_GUIDE.md` para documentacion detallada del esquema y el algoritmo de matching.
+
 ### Guías de integración
 
 | Guía | Contenido |
 |------|-----------|
 | `CODEX_DATA_GUIDE.md` | Formato de datos de Codex CLI |
 | `PENCIL_DATA_GUIDE.md` | Formato de datos de Pencil + algoritmo de adjudicacion |
-| `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (OpenCode, Antigravity CLI, etc.) con trampas de performance ya conocidas |
+| `OPENCODE_DATA_GUIDE.md` | Formato del SQLite de OpenCode (opencode.db) + reglas de adjudicacion |
+| `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (Antigravity CLI, etc.) con trampas de performance ya conocidas |
 
 ## Opciones de Linea de Comandos
 
@@ -428,6 +507,7 @@ usage: process_sessions.py [-h] [-v] [-o OUTPUT] [--last LAST]
                            [--file-history FILE_HISTORY] [--no-subagents]
                            [--codex-dir CODEX_DIR] [--qwen-dir QWEN_DIR]
                            [--pencil-dir PENCIL_DIR]
+                           [--opencode-dir OPENCODE_DIR]
                            [input_dir]
 
 Argumentos:
@@ -440,6 +520,7 @@ Argumentos:
   --codex-dir DIR       Directorio de Codex CLI (~/.codex/) para integrar delegaciones
   --qwen-dir DIR        Directorio de Qwen CLI (~/.qwen/) para incluir sesiones paralelas
   --pencil-dir DIR      Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño
+  --opencode-dir DIR    Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas
 ```
 
 ## Caracteristicas Tecnicas
@@ -451,6 +532,7 @@ Argumentos:
 - v4.0: Detecta invocaciones a Codex por patrones en tool_use
 - v4.1: Matchea proyecto Claude con proyecto Qwen por CWD
 - v5.0: Adjudica sesiones Pencil al proyecto Claude por prefijo de cwd, votacion por rutas .pen o solapamiento temporal
+- v5.1: Adjudica sesiones OpenCode (SQLite) al proyecto Claude por prefijo de cwd con contencion real, votacion por rutas de patches/tools o solapamiento temporal
 - Procesa multiples sesiones
 
 ### Extraccion Inteligente
@@ -482,7 +564,23 @@ Argumentos:
 
 ## Actualizaciones
 
-### Version 5.0 (Actual)
+### Version 5.1 (Actual)
+- Integracion con OpenCode CLI via `--opencode-dir` (fuente: `~/.local/share/opencode/opencode.db`)
+- Lectura SQLite **read-only** con extraccion `json_extract` + caps `substr` server-side:
+  filas de `message`/`part` de hasta 31 MB nunca se cargan enteras (DB completa: <2 s)
+- Tokens/costo desde el rollup de la tabla `session` (verificado contra la suma de mensajes)
+  y usage por modelo (`provider/model (variant)`) desde los mensajes assistant
+- Adjudicacion al proyecto Claude reutilizando el motor de Pencil con 3 reglas auditables:
+  cwd (prefijo con **contencion real**) -> votacion por rutas de patches/tools/adjuntos ->
+  solapamiento temporal. Cada sesion reporta la regla usada y su score
+- Sub-agentes (sesiones con `parent_id`) detectados, resumidos sin Q&A y marcados en la cronologia
+- Nuevo reporte: `14_opencode_sesiones.md` — sesiones agrupadas por proyecto con Q&A
+- Nuevo reporte: `15_opencode_modelos_uso.md` — tokens, costo USD, $/turno, tasa de respuesta
+  por modelo + top de herramientas
+- Seccion "Consumo OpenCode" agregada a `09_eficiencia_tokens.md`
+- Documentacion de formato en `OPENCODE_DATA_GUIDE.md`
+
+### Version 5.0
 - Integracion con Pencil / pen.dev (agente de diseño) via `--pencil-dir`
 - Parser streaming de `pi-sessions/*.jsonl` (archivos de hasta +45 MB)
 - Adjudicacion inteligente al proyecto Claude en 3 reglas auditables: prefijo de cwd ->

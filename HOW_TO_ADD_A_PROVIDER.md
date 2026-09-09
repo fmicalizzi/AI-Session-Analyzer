@@ -1,6 +1,7 @@
-# Cómo agregar una nueva herramienta de agentes (checklist v5.0)
+# Cómo agregar una nueva herramienta de agentes (checklist v5.1)
 
-Guía de integración probada con **Codex (v4.0)**, **Qwen (v4.1)** y **Pencil (v5.0)**.
+Guía de integración probada con **Codex (v4.0)**, **Qwen (v4.1)**, **Pencil (v5.0)** y
+**OpenCode (v5.1)**.
 Cada herramienta nueva sigue los mismos 6 pasos de código + documentación + tests.
 Tiempo típico: 1 sesión de trabajo.
 
@@ -98,13 +99,19 @@ gh run watch <id> --exit-status   # verde en la matriz antes de dar por hecho
 
 ---
 
-## Referencia rápida (líneas aproximadas, v5.0)
+## Referencia rápida (líneas aproximadas, v5.1)
 
 | Pieza | Buscar |
 |-------|--------|
-| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions` |
-| Parser | `_parse_pencil_session` (streaming) |
-| Matching | `_best_project_match`, `_match_pencil_project`, `_collect_claude_project_cwds` |
-| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report` |
+| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions`, `_load_opencode_sessions` |
+| Parser | `_parse_pencil_session` (streaming), `_query_opencode_*` (SQLite: `json_extract` + `substr` server-side, jamás `SELECT data` crudo) |
+| Matching | `_best_project_match`, `_match_pencil_project`, `_match_opencode_project`, `_collect_claude_project_cwds` |
+| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report`, `_generate_opencode_report`, `_generate_opencode_models_report` |
 | Split seguro | `_split_large_file` |
-| CLI | `main()` → `--pencil-dir` como plantilla de flag |
+| CLI | `main()` → `--pencil-dir` / `--opencode-dir` como plantilla de flag |
+
+### Si la fuente es SQLite (OpenCode y futuros)
+- Abrir **read-only**: `sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)`; degradar con WARN si no se puede.
+- Extraer campos con `json_extract(data,'$.x')` y `substr(...,1,N)` **en el SELECT**: evita traer `data` crudos de 30 MB. Verificar antes que la build tenga JSON1 (`SELECT json_extract('{"a":1}','$.a')`).
+- Si la tabla tiene rollups de costo/tokens (`session.cost`, `tokens_*`), validar contra la suma de mensajes y usarlos: son exactos y gratis.
+- ids tipo `msg_...`/`prt_...` suelen ser cronológicamente ordenables; aprovechar los índices `(session_id,...)` existentes en vez de ordenar por columnas no indexadas.

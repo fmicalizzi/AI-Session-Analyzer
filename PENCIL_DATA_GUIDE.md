@@ -73,7 +73,9 @@ Input: set de `cwd`s de los mensajes Claude procesados (`_collect_claude_project
 1. **Regla `cwd`** — mayor prefijo de segmentos de ruta entre el `cwd` de la sesión
    Pencil y cada proyecto Claude. Coincide tanto si Pencil está en una **subcarpeta**
    del proyecto como en su raíz. Mínimo 4 segmentos compartidos; empate entre dos
-   proyectos ⇒ pasa a la regla 2.
+   proyectos ⇒ pasa a la regla 2. Desde v5.1 además exige **contención real**: el
+   `cwd` debe estar en la raíz del proyecto o por debajo (elimina falsos positivos
+   entre hermanos de `~/Claude` que solo comparten la raíz común).
 2. **Regla `paths`** — votación: las rutas externas (.pen, documentos) extraídas de
    `toolCall.arguments.filePath` y del texto desktop buscan proyecto con el mismo
    criterio de prefijo común; gana la puntuación más alta (sin empate).
