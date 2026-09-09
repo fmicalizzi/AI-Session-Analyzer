@@ -317,27 +317,27 @@ class TestOpenCodeIntegration(unittest.TestCase):
         """)
         con.execute("INSERT INTO project VALUES ('p1', '/Users/tester/dev/proj-app')")
 
-        # sesion A: cwd subcarpeta del proyecto (raiz)
+        # sesión A: cwd subcarpeta del proyecto (raiz)
         con.execute(
             "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ('sesA', 'p1', None, 'slug-a', '/Users/tester/dev/proj-app/sub',
              'Hero azul', 'build',
              '{"id":"model-x","providerID":"opencode-go","variant":"medium"}',
              0.003, 10, 20, 5, 0, 0, self.ms_start, self.ms_end))
-        # sesion B: sub-agente de A
+        # sesión B: sub-agente de A
         con.execute(
             "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ('sesB', 'p1', 'sesA', 'slug-b', '/Users/tester/dev/proj-app/sub',
              'explore tareas', 'explore',
              '{"id":"model-x","providerID":"opencode-go"}',
              0.001, 1, 2, 0, 0, 0, self.ms_mid, self.ms_mid + 1000))
-        # sesion C: cwd fuera de todo proyecto, peros paths reales del proyecto
+        # sesión C: cwd fuera de todo proyecto, peros paths reales del proyecto
         con.execute(
             "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ('sesC', 'p1', None, 'slug-c', '/Users/tester/.opencode-cache/uuid-9',
              'Parche suelto', 'build', '', 0.001, 3, 4, 0, 0, 0,
              self.ms_mid, self.ms_end))
-        # sesion D: sin cwd ni paths utiles -> solo tiempo
+        # sesión D: sin cwd ni paths útiles -> solo tiempo
         con.execute(
             "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ('sesD', 'p1', None, 'slug-d', '/mnt/nada/xyz', 'Sin senales', 'build',
@@ -586,7 +586,7 @@ class TestAntigravityIntegration(unittest.TestCase):
             ],
             gens=[self._gen("gemini-3.8-flash", 30, 9000, 5)])
 
-        # convC: sin workspace ni paths utiles -> solo tiempo
+        # convC: sin workspace ni paths útiles -> solo tiempo
         self._make_db(
             self.conv_dir / "convC.db",
             steps=[
@@ -594,7 +594,7 @@ class TestAntigravityIntegration(unittest.TestCase):
                 (15, self._agent_step(sec(11, 1), answer="hi")),
             ])
 
-        # convD: base vacia (sin steps) -> se degrada, no rompe
+        # convD: base vacía (sin steps) -> se degrada, no rompe
         self._make_db(self.conv_dir / "convD.db")
 
         with open(self.agy_dir / "cache" / "conversation_metadata.json", 'w') as f:

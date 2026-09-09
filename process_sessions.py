@@ -62,7 +62,7 @@ class SessionProcessor:
         # v3.0: Mapeo de directorios de sesión
         self.session_dirs = {}            # {session_id: Path}
 
-        # v3.1: Token usage por sesion principal
+        # v3.1: Token usage por sesión principal
         self.session_token_usage = {}     # {session_file: {input, output, cache_create, cache_read}}
 
         # v4.0: Codex integration
@@ -145,7 +145,7 @@ class SessionProcessor:
         timestamp = data.get('timestamp', '')
         message_type = data.get('type', '')
 
-        # Actualizar tiempos de sesion
+        # Actualizar tiempos de sesión
         if timestamp:
             if not session_data['start_time'] or timestamp < session_data['start_time']:
                 session_data['start_time'] = timestamp
@@ -154,7 +154,7 @@ class SessionProcessor:
 
         session_data['total_messages'] += 1
 
-        # Procesar segun el tipo de mensaje
+        # Procesar según el tipo de mensaje
         if message_type == 'user':
             self._process_user_message(data, session_data, line_num)
         elif message_type == 'assistant':
@@ -202,7 +202,7 @@ class SessionProcessor:
                             session_data['messages'].append(('user', text_content[:200] + '...' if len(text_content) > 200 else text_content))
 
     def _process_assistant_message(self, data: Dict[str, Any], session_data: Dict[str, Any], line_num: int):
-        """Procesa mensajes del asistente, incluyendo deteccion de invocaciones Agent"""
+        """Procesa mensajes del asistente, incluyendo detección de invocaciones Agent"""
         message_content = data.get('message', {})
         content = message_content.get('content', [])
 
@@ -242,9 +242,9 @@ class SessionProcessor:
                         })
 
         # v3.1: Registrar token usage deduplicado por message.id
-        # Cada API call genera multiples lineas JSONL (una por content block),
+        # Cada API call genera múltiples lineas JSONL (una por content block),
         # todas con el mismo message.id pero el output_tokens se actualiza (streaming).
-        # Guardamos la ultima ocurrencia de cada msg_id para tener el valor final.
+        # Guardamos la última ocurrencia de cada msg_id para tener el valor final.
         msg_id = message_content.get('id', '')
         usage = message_content.get('usage', {})
         if msg_id and usage:
@@ -390,7 +390,7 @@ class SessionProcessor:
         if any(keyword in combined_output for keyword in ['npm test', 'yarn test', 'pytest', 'jest', 'mocha', 'cargo test']):
             return {'type': 'test', 'tool': 'Test', 'details': 'Test execution'}
 
-        # Operacion bash generica
+        # Operación bash genérica
         return {'type': 'terminal_result', 'tool': 'Bash', 'details': f"Terminal output: {stdout[:100]}..."}
 
     def _extract_file_operation_details(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
@@ -435,7 +435,7 @@ class SessionProcessor:
             prompt_preview = tool_input['prompt'][:80] + '...' if len(tool_input['prompt']) > 80 else tool_input['prompt']
             details.append(f"Tarea: {prompt_preview}")
 
-        # Extraer descripcion si existe
+        # Extraer descripción si existe
         if 'description' in tool_input:
             desc = tool_input['description'][:50] + '...' if len(tool_input['description']) > 50 else tool_input['description']
             details.append(f"Descripcion: {desc}")
@@ -503,7 +503,7 @@ class SessionProcessor:
             # Ordenar por timestamp de forma segura
             s_messages.sort(key=lambda x: x[1].get('timestamp') or '')
 
-            # Crear pares Q&A para la sesion actual
+            # Crear pares Q&A para la sesión actual
             current_question = None
             for msg_type, msg in s_messages:
                 if msg_type == 'user' and msg['content'].strip():
@@ -550,10 +550,10 @@ class SessionProcessor:
     # ========================================================================
 
     def _discover_session_directories(self):
-        """Descubre directorios de sesion que contienen subagentes y/o tool-results"""
+        """Descubre directorios de sesión que contienen subagentes y/o tool-results"""
         for entry in self.input_dir.iterdir():
             if entry.is_dir() and not entry.name.startswith('.') and entry.name not in ('reports', 'memory', 'reportes'):
-                # Verificar si parece un UUID de sesion
+                # Verificar si parece un UUID de sesión
                 if len(entry.name) > 8 and '-' in entry.name:
                     self.session_dirs[entry.name] = entry
                     subagents_dir = entry / 'subagents'
@@ -576,7 +576,7 @@ class SessionProcessor:
             if not subagent_files:
                 continue
 
-            print(f"  Procesando {len(subagent_files)} subagentes de sesion {session_id[:12]}...")
+            print(f"  Procesando {len(subagent_files)} subagentes de sesión {session_id[:12]}...")
 
             for sa_file in subagent_files:
                 sa_data = self._process_subagent_file(sa_file, session_id)
@@ -607,7 +607,7 @@ class SessionProcessor:
             'end_time': None,
             'total_messages': 0,
             'prompt': '',          # La tarea asignada (primer mensaje user)
-            'final_response': '',  # Ultima respuesta de texto
+            'final_response': '',  # Última respuesta de texto
             'tool_uses': [],       # Herramientas usadas por el subagente
             'files_touched': set(),
             'tools_used_counts': {},  # {tool_name: count}
@@ -703,7 +703,7 @@ class SessionProcessor:
                                         sa_data['tools_used_counts'][tool_name] = \
                                             sa_data['tools_used_counts'].get(tool_name, 0) + 1
 
-                                        # Registrar la operacion
+                                        # Registrar la operación
                                         sa_data['tool_uses'].append({
                                             'tool': tool_name,
                                             'timestamp': timestamp,
@@ -716,7 +716,7 @@ class SessionProcessor:
                                             clean_name = self._get_clean_filename(file_path_found)
                                             sa_data['files_touched'].add(clean_name)
 
-                                        # Registrar como operacion de subagente
+                                        # Registrar como operación de subagente
                                         self.subagent_operations.append({
                                             'agent_id': agent_id,
                                             'session_id': session_id,
@@ -728,7 +728,7 @@ class SessionProcessor:
                                         })
 
                     elif msg_type == 'progress':
-                        # Los mensajes de progreso no cuentan como mensajes de conversacion
+                        # Los mensajes de progreso no cuentan como mensajes de conversación
                         pass
 
                 sa_data['final_response'] = last_text_response[:500]
@@ -748,13 +748,13 @@ class SessionProcessor:
         del sa_data['_token_by_msg']
         del sa_data['_seen_msg_ids']
 
-        # Convertir set a list para serializacion
+        # Convertir set a list para serialización
         sa_data['files_touched'] = sorted(sa_data['files_touched'])
 
         return sa_data if sa_data['total_messages'] > 0 else None
 
     def _get_subagents_for_qa(self, qa_pair) -> List[Dict[str, Any]]:
-        """Encuentra subagentes invocados durante una interaccion Q&A"""
+        """Encuentra subagentes invocados durante una interacción Q&A"""
         session_id = qa_pair['session_file'].replace('.jsonl', '')
         q_time = qa_pair['question_timestamp']
         a_time = qa_pair['answer_timestamp'] or q_time
@@ -1398,7 +1398,7 @@ class SessionProcessor:
         return session
 
     # ========================================================================
-    # V5.0: INTEGRACION PENCIL (pen.dev) - sesiones de diseño
+    # V5.0: INTEGRACIÓN PENCIL (pen.dev) - sesiones de diseño
     # ========================================================================
 
     PENCIL_INJECT_RE = None  # compilado perezosamente
@@ -1427,11 +1427,11 @@ class SessionProcessor:
         return n
 
     def _best_project_match(self, path: str, min_common: int = 4, projects: list = None):
-        """Proyecto Claude con mayor prefijo comun. Ambiguo si empatan dos.
+        """Proyecto Claude con mayor prefijo común. Ambiguo si empatan dos.
         projects=None usa la lista de Pencil (compatibilidad v5.0).
-        v5.1: ademas del minimo de segmentos, exige contencion real: el path
+        v5.1: además del mínimo de segmentos, exige contención real: el path
         debe estar en la raiz del proyecto o por debajo (evita falsos positivos
-        con caminos hermanos o con la raiz comun ~/Claude)."""
+        con caminos hermanos o con la raiz común ~/Claude)."""
         if not path:
             return None, None
         pool = self.pencil_projects if projects is None else projects
@@ -1441,7 +1441,7 @@ class SessionProcessor:
             if score < min_common:
                 continue
             if score < len(self._path_segments(proj)):
-                continue  # el path no esta dentro del proyecto
+                continue  # el path no está dentro del proyecto
             if score > best_score:
                 best, best_score, ambiguous = proj, score, False
             elif score == best_score and score >= min_common and best != proj:
@@ -1451,8 +1451,8 @@ class SessionProcessor:
         return None, best_score
 
     def _match_pencil_project(self, session: Dict[str, Any]):
-        """Adjudica un proyecto Claude a una sesion Pencil.
-        Regla 1: prefijo del cwd. Regla 2: votacion por rutas externas (.pen etc).
+        """Adjudica un proyecto Claude a una sesión Pencil.
+        Regla 1: prefijo del cwd. Regla 2: votación por rutas externas (.pen etc).
         Regla 3: desempate temporal (solapamiento con sesiones Claude)."""
         proj, score = self._best_project_match(session.get('cwd', ''))
         if proj:
@@ -1718,7 +1718,7 @@ class SessionProcessor:
               f"(con proyecto Claude: {matched}, sin proyecto: {len(self.pencil_sessions) - matched})")
 
     # ========================================================================
-    # V5.1: INTEGRACION OPENCODE (CLI) - sesiones paralelas desde opencode.db
+    # V5.1: INTEGRACIÓN OPENCODE (CLI) - sesiones paralelas desde opencode.db
     # ========================================================================
 
     OPENCODE_TEXT_CAP = 12000    # chars por texto de part (substr server-side)
@@ -1824,7 +1824,7 @@ class SessionProcessor:
         return {sid: sessions[sid] for sid in order}
 
     def _query_opencode_messages(self, con, sessions: Dict[str, Dict]):
-        """Usage por modelo + cronologia de mensajes. Nunca se lee data crudo:
+        """Usage por modelo + cronología de mensajes. Nunca se lee data crudo:
         json_extract server-side (el data de un user puede medir decenas de MB)."""
         cur = con.cursor()
         try:
@@ -1963,10 +1963,10 @@ class SessionProcessor:
                     'ts_user': pending[1], 'ts_assistant': buf_ts})
 
     def _match_opencode_project(self, session: Dict[str, Any]):
-        """Adjudica proyecto Claude a una sesion OpenCode.
-        Regla 1: prefijo con contencion real sobre session.directory
-        (project.worktree solo si el cwd viene vacio).
-        Regla 2: votacion por rutas reales (patches, tool inputs, adjuntos).
+        """Adjudica proyecto Claude a una sesión OpenCode.
+        Regla 1: prefijo con contención real sobre session.directory
+        (project.worktree solo si el cwd viene vacío).
+        Regla 2: votación por rutas reales (patches, tool inputs, adjuntos).
         Regla 3: desempate temporal con mensajes Claude."""
         proj, score = self._best_project_match(session.get('cwd', ''),
                                                projects=self.opencode_projects)
@@ -2057,7 +2057,7 @@ class SessionProcessor:
               f"sub-agentes: {subs})")
 
     # ========================================================================
-    # V5.2: INTEGRACION ANTIGRAVITY CLI (Google) - conversations/*.db (SQLite+protobuf)
+    # V5.2: INTEGRACIÓN ANTIGRAVITY CLI (Google) - conversations/*.db (SQLite+protobuf)
     # ========================================================================
 
     AGY_ARG_CAP = 2000       # chars del JSON de arguments de un tool call
@@ -2083,7 +2083,7 @@ class SessionProcessor:
 
     @classmethod
     def _pb_fields(cls, b: bytes) -> List[Tuple[int, int, Any]]:
-        """Decodificador wire-format generico (sin schema): [(field_no, wire_type, value)].
+        """Decodificador wire-format genérico (sin schema): [(field_no, wire_type, value)].
         value: int (wt 0/1/5), bytes (wt 2). Se detiene ante datos ilegibles."""
         out = []
         i = 0
@@ -2123,7 +2123,7 @@ class SessionProcessor:
 
     @classmethod
     def _pb_get(cls, fields: list, fn: int):
-        """Primer valor del numero de campo pedido (o None)."""
+        """Primer valor del número de campo pedido (o None)."""
         for f, _wt, v in fields:
             if f == fn:
                 return v
@@ -2149,7 +2149,7 @@ class SessionProcessor:
             return None
 
     def _agy_usage_from(self, blob) -> Dict[str, int]:
-        """Uso de una generacion LLM: f3 salida, f5 contexto/entrada, f9 razonamiento."""
+        """Uso de una generación LLM: f3 salida, f5 contexto/entrada, f9 razonamiento."""
         u = {'output': 0, 'input': 0, 'reasoning': 0}
         if not isinstance(blob, bytes):
             return u
@@ -2166,7 +2166,7 @@ class SessionProcessor:
 
     def _parse_antigravity_conversation(self, db_path: Path,
                                         cache_info: Optional[Dict] = None) -> Optional[Dict]:
-        """Parsea una conversacion Antigravity (un .db = una sesion).
+        """Parsea una conversación Antigravity (un .db = una sesión).
         Streaming: fila por fila de `steps`, payload protobuf decodiado por paso y
         descartado salvo lo necesario. Los tool-results (type 132) nunca se retienen."""
         try:
@@ -2324,7 +2324,7 @@ class SessionProcessor:
 
     def _load_antigravity_cache_metadata(self, base: Path) -> Dict[str, Dict]:
         """cache/conversation_metadata.json: {ID: {Preview, WorkspaceURIs, ...}}.
-        Archivo chico (~300 KB): json.load esta permitido (no es una fuente de sesiones)."""
+        Archivo chico (~300 KB): json.load está permitido (no es una fuente de sesiones)."""
         meta_path = base / 'cache' / 'conversation_metadata.json'
         if not meta_path.exists():
             return {}
@@ -2344,9 +2344,9 @@ class SessionProcessor:
         return out
 
     def _match_antigravity_project(self, session: Dict[str, Any]):
-        """Adjudica proyecto Claude a una conversacion Antigravity.
-        Regla 1: workspace (cwd) con prefijo + contencion real.
-        Regla 2: votacion por rutas de tool calls / prompts.
+        """Adjudica proyecto Claude a una conversación Antigravity.
+        Regla 1: workspace (cwd) con prefijo + contención real.
+        Regla 2: votación por rutas de tool calls / prompts.
         Regla 3: desempate temporal con mensajes Claude."""
         proj, score = self._best_project_match(session.get('cwd', ''),
                                                projects=self.antigravity_projects)
@@ -2398,7 +2398,7 @@ class SessionProcessor:
         self.antigravity_projects = self._collect_claude_project_cwds()
         cache_meta = self._load_antigravity_cache_metadata(base)
 
-        print(f"  Bases de conversacion encontradas: {len(dbs)} | proyectos Claude: "
+        print(f"  Bases de conversación encontradas: {len(dbs)} | proyectos Claude: "
               f"{len(self.antigravity_projects)}")
         for db_path in dbs:
             cid = db_path.stem
@@ -2419,7 +2419,7 @@ class SessionProcessor:
 
 
     # ========================================================================
-    # GENERACION DE REPORTES
+    # GENERACIÓN DE REPORTES
     # ========================================================================
 
     def generate_reports(self):
@@ -2454,7 +2454,7 @@ class SessionProcessor:
         if self.qwen_sessions:
             self._generate_qwen_parallel_report()
 
-        # v5.0: Reportes Pencil (diseno)
+        # v5.0: Reportes Pencil (diseño)
         if self.pencil_sessions:
             self._generate_pencil_report()
             self._generate_pencil_models_report()
@@ -2520,7 +2520,7 @@ class SessionProcessor:
             content.append(f"- **Mensajes Qwen:** {total_qwen_msgs}\n")
             content.append(f"- **Comandos Qwen:** {total_qwen_tools}\n")
 
-        # v5.x: agentes externos con adjudicacion al proyecto (Pencil/OpenCode/Antigravity)
+        # v5.x: agentes externos con adjudicación al proyecto (Pencil/OpenCode/Antigravity)
         if self.pencil_sessions or self.opencode_sessions or self.antigravity_sessions:
             content.append("\n### Agentes externos (v5.x)\n\n")
             for name, sess in (('Pencil', self.pencil_sessions),
@@ -2550,13 +2550,13 @@ class SessionProcessor:
             content.append(f"- **Total mensajes:** {session['total_messages']}\n")
             content.append(f"- **Operaciones:** {len(session['operations'])}\n")
 
-            # v3.0: Contar subagentes de esta sesion
+            # v3.0: Contar subagentes de esta sesión
             session_id = session['file'].replace('.jsonl', '')
             session_subagents = [sa for sa in self.subagent_data if sa['session_id'] == session_id]
             if session_subagents:
                 content.append(f"- **Subagentes:** {len(session_subagents)}\n")
 
-            # v3.1: Token usage de la sesion
+            # v3.1: Token usage de la sesión
             tu = session.get('token_usage', {})
             total_tokens = tu.get('input_tokens', 0) + tu.get('output_tokens', 0)
             if total_tokens > 0:
@@ -2569,7 +2569,7 @@ class SessionProcessor:
 
             content.append("\n")
 
-        content.append("## Herramientas Mas Utilizadas\n\n")
+        content.append("## Herramientas Más Utilizadas\n\n")
         tool_counts = {}
         for op in self.file_operations:
             tool = op['tool_name']
@@ -2611,7 +2611,7 @@ class SessionProcessor:
 
         # v3.0: Resumen de sesiones con subagentes
         if self.session_dirs:
-            content.append("\n## Directorios de Sesion Detectados\n\n")
+            content.append("\n## Directorios de Sesión Detectados\n\n")
             for sid, sdir in sorted(self.session_dirs.items()):
                 has_subs = (sdir / 'subagents').exists()
                 has_tr = (sdir / 'tool-results').exists()
@@ -2635,13 +2635,13 @@ class SessionProcessor:
         output_file = self.output_dir / "01_historico_mensajes_usuario.md"
 
         content = []
-        content.append("# Historico de Mensajes del Usuario\n\n")
+        content.append("# Histórico de Mensajes del Usuario\n\n")
         content.append(f"Total de mensajes: {len(self.user_messages)}\n\n")
         content.append("---\n\n")
 
         for i, msg in enumerate(self.user_messages, 1):
             content.append(f"## Mensaje #{i}\n\n")
-            content.append(f"**Archivo de sesion:** {msg['session_file']}\n")
+            content.append(f"**Archivo de sesión:** {msg['session_file']}\n")
             content.append(f"**Timestamp:** {msg['timestamp']}\n")
             content.append(f"**Linea:** {msg['line_number']}\n")
             content.append(f"**Directorio:** {msg['cwd']}\n\n")
@@ -2663,7 +2663,7 @@ class SessionProcessor:
 
         for i, resp in enumerate(self.assistant_responses, 1):
             content.append(f"## Respuesta #{i}\n\n")
-            content.append(f"**Archivo de sesion:** {resp['session_file']}\n")
+            content.append(f"**Archivo de sesión:** {resp['session_file']}\n")
             content.append(f"**Timestamp:** {resp['timestamp']}\n")
             content.append(f"**Linea:** {resp['line_number']}\n")
             content.append(f"**Modelo:** {resp['model']}\n")
@@ -2686,7 +2686,7 @@ class SessionProcessor:
 
         for i, qa in enumerate(self.qa_pairs, 1):
             content.append(f"## Q&A #{i}\n\n")
-            content.append(f"**Archivo de sesion:** {qa['session_file']}\n")
+            content.append(f"**Archivo de sesión:** {qa['session_file']}\n")
             content.append(f"**Timestamp pregunta:** {qa['question_timestamp']}\n")
             content.append(f"**Timestamp respuesta:** {qa['answer_timestamp']}\n\n")
 
@@ -2706,10 +2706,10 @@ class SessionProcessor:
 
         content = []
         content.append("# Operaciones de Archivos\n\n")
-        content.append(f"Total de operaciones (sesion principal): {len(self.file_operations)}\n")
+        content.append(f"Total de operaciones (sesión principal): {len(self.file_operations)}\n")
         if self.subagent_operations:
             content.append(f"Total de operaciones (subagentes): {len(self.subagent_operations)}\n")
-        content.append("\nFormato: Operacion | Archivo | Herramienta\n\n")
+        content.append("\nFormato: Operación | Archivo | Herramienta\n\n")
         content.append("---\n\n")
 
         content.append("## Operaciones de Sesiones Principales\n\n")
@@ -2725,12 +2725,12 @@ class SessionProcessor:
         self._split_large_file(output_file, full_content)
 
     def _render_qa_operations_section(self, qa, content):
-        """Renderiza la seccion de operaciones de archivos para un Q&A (usado por reportes 05 y ultimas N)"""
+        """Renderiza la sección de operaciones de archivos para un Q&A (usado por reportes 05 y últimas N)"""
         operations_in_timeframe = self._get_operations_between_qa(qa)
 
         if operations_in_timeframe:
             content.append("### Operaciones de Archivos Ejecutadas:\n")
-            content.append(f"*Se ejecutaron {len(operations_in_timeframe)} operaciones durante esta interaccion:*\n\n")
+            content.append(f"*Se ejecutaron {len(operations_in_timeframe)} operaciones durante esta interacción:*\n\n")
 
             operation_summary = {}
             files_touched = set()
@@ -2777,14 +2777,14 @@ class SessionProcessor:
                             detail = f"{operation_type} | Archivo: {clean_name}"
                     content.append(f"  - {detail}\n")
                 if len(ops) > 3:
-                    content.append(f"  - *(y {len(ops) - 3} operaciones mas...)*\n")
+                    content.append(f"  - *(y {len(ops) - 3} operaciones más...)*\n")
             content.append("\n")
         else:
             content.append("### Operaciones de Archivos:\n")
-            content.append("*No se registraron operaciones de archivos especificas durante esta interaccion.*\n\n")
+            content.append("*No se registraron operaciones de archivos específicas durante esta interacción.*\n\n")
 
     def _render_qa_subagents_section(self, qa, content):
-        """Renderiza la seccion de subagentes para un Q&A"""
+        """Renderiza la sección de subagentes para un Q&A"""
         subagents = self._get_subagents_for_qa(qa)
         if not subagents:
             return
@@ -2799,11 +2799,11 @@ class SessionProcessor:
             content.append(f"#### Subagente: {slug_display}\n")
             content.append(f"- **Modelo:** {model_short}")
             if duration:
-                content.append(f" | **Duracion:** {duration}")
+                content.append(f" | **Duración:** {duration}")
             content.append(f" | **Mensajes:** {sa['total_messages']}\n")
 
             if sa.get('is_compact'):
-                content.append("- *(sesion compactada)*\n")
+                content.append("- *(sesión compactada)*\n")
 
             # Tarea asignada
             if sa['prompt']:
@@ -2821,7 +2821,7 @@ class SessionProcessor:
                 files_display = sa['files_touched'][:10]
                 files_str = ', '.join(f"`{f}`" for f in files_display)
                 if len(sa['files_touched']) > 10:
-                    files_str += f" *(y {len(sa['files_touched']) - 10} mas)*"
+                    files_str += f" *(y {len(sa['files_touched']) - 10} más)*"
                 content.append(f"- **Archivos:** {files_str}\n")
 
             # Token usage
@@ -2839,25 +2839,25 @@ class SessionProcessor:
         content = []
         content.append("# Pares de Preguntas y Respuestas con Operaciones de Archivos\n\n")
         content.append(f"Total de pares Q&A: {len(self.qa_pairs)}\n\n")
-        content.append("*Este reporte muestra cada pregunta-respuesta con un resumen de las operaciones de archivos ejecutadas durante esa interaccion.*\n")
+        content.append("*Este reporte muestra cada pregunta-respuesta con un resumen de las operaciones de archivos ejecutadas durante esa interacción.*\n")
         if self.subagent_data:
-            content.append("*v3.0: Incluye actividad de subagentes vinculada a cada interaccion.*\n")
+            content.append("*v3.0: Incluye actividad de subagentes vinculada a cada interacción.*\n")
         content.append("\n---\n\n")
 
         for i, qa in enumerate(self.qa_pairs, 1):
             content.append(f"## Q&A #{i}\n\n")
-            content.append(f"**Archivo de sesion:** {qa['session_file']}\n\n")
+            content.append(f"**Archivo de sesión:** {qa['session_file']}\n\n")
 
             question_time = self._format_timestamp(qa['question_timestamp'])
             answer_time = self._format_timestamp(qa['answer_timestamp'])
             duration = self._calculate_interaction_duration(qa['question_timestamp'], qa['answer_timestamp'])
 
-            content.append("**Cronologia de la interaccion:**\n")
+            content.append("**Cronología de la interacción:**\n")
             content.append(f"- **Inicio (Usuario envia):** {question_time}\n")
             if qa['answer_timestamp']:
                 content.append(f"- **Fin (Sistema responde):** {answer_time}\n")
                 if duration:
-                    content.append(f"- **Duracion:** {duration}\n")
+                    content.append(f"- **Duración:** {duration}\n")
             else:
                 content.append("- **Fin:** Sin respuesta registrada\n")
             content.append("\n")
@@ -2867,7 +2867,7 @@ class SessionProcessor:
             content.append(qa['question'])
             content.append("\n\n")
 
-            # Operaciones de archivos (sesion principal)
+            # Operaciones de archivos (sesión principal)
             self._render_qa_operations_section(qa, content)
 
             # v3.0: Subagentes invocados
@@ -2904,9 +2904,9 @@ class SessionProcessor:
 
         content = []
         content.append("# Log de Operaciones de Archivos\n\n")
-        content.append("Formato CSV separado por ';' para importacion:\n\n")
+        content.append("Formato CSV separado por ';' para importación:\n\n")
         content.append("```\n")
-        content.append("Operacion;Ruta;Herramienta;Sesion;Timestamp;Origen\n")
+        content.append("Operacion;Ruta;Herramienta;Sesión;Timestamp;Origen\n")
 
         # Combinar operaciones principales y de subagentes
         all_ops = []
@@ -2950,7 +2950,7 @@ class SessionProcessor:
 
         content.append("```\n\n")
         content.append(f"**Total de operaciones registradas:** {len(all_ops)}\n")
-        content.append(f"  - Sesion principal: {len(self.file_operations)}\n")
+        content.append(f"  - Sesión principal: {len(self.file_operations)}\n")
         content.append(f"  - Subagentes: {len(self.subagent_operations)}\n\n")
         content.append("**Nota:** Este archivo puede importarse como CSV usando ';' como separador.\n")
 
@@ -2975,20 +2975,20 @@ class SessionProcessor:
         sessions_with_sa = set(sa['session_id'] for sa in self.subagent_data)
         content.append(f"**Sesiones con subagentes:** {len(sessions_with_sa)}\n")
 
-        # Modelo mas utilizado
+        # Modelo más utilizado
         model_counts = {}
         for sa in self.subagent_data:
             m = sa['model'] or 'desconocido'
             model_counts[m] = model_counts.get(m, 0) + 1
         if model_counts:
             top_model = max(model_counts.items(), key=lambda x: x[1])
-            content.append(f"**Modelo mas utilizado:** {top_model[0]} ({top_model[1]})\n")
+            content.append(f"**Modelo más utilizado:** {top_model[0]} ({top_model[1]})\n")
 
         content.append("\n---\n\n")
 
         # Estadisticas globales
         content.append("## Estadisticas Globales\n\n")
-        content.append("| Metrica | Valor |\n")
+        content.append("| Métrica | Valor |\n")
         content.append("|---------|-------|\n")
         content.append(f"| Total subagentes | {len(self.subagent_data)} |\n")
 
@@ -3017,7 +3017,7 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # Herramientas mas usadas por subagentes
+        # Herramientas más usadas por subagentes
         content.append("## Top Herramientas de Subagentes\n\n")
         sa_tool_totals = {}
         for sa in self.subagent_data:
@@ -3029,14 +3029,14 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # Detalle por sesion
-        content.append("## Detalle por Sesion\n\n")
+        # Detalle por sesión
+        content.append("## Detalle por Sesión\n\n")
 
         for session_id in sorted(sessions_with_sa):
             session_subagents = [sa for sa in self.subagent_data if sa['session_id'] == session_id]
             session_subagents.sort(key=lambda x: x['start_time'] or '')
 
-            content.append(f"### Sesion: {session_id[:16]}...\n\n")
+            content.append(f"### Sesión: {session_id[:16]}...\n\n")
             content.append(f"**Subagentes:** {len(session_subagents)}")
 
             times = [sa['start_time'] for sa in session_subagents if sa['start_time']]
@@ -3054,10 +3054,10 @@ class SessionProcessor:
                 content.append(f"- **Modelo:** {model_short}\n")
                 content.append(f"- **Inicio:** {self._format_timestamp(sa['start_time'])}\n")
                 if duration:
-                    content.append(f"- **Duracion:** {duration}\n")
+                    content.append(f"- **Duración:** {duration}\n")
                 content.append(f"- **Mensajes:** {sa['total_messages']}\n")
                 if sa['is_compact']:
-                    content.append("- *(sesion compactada)*\n")
+                    content.append("- *(sesión compactada)*\n")
 
                 # Tokens
                 inp = sa['token_usage']['input_tokens']
@@ -3086,7 +3086,7 @@ class SessionProcessor:
                     for f_name in sa['files_touched'][:15]:
                         content.append(f"- `{f_name}`\n")
                     if len(sa['files_touched']) > 15:
-                        content.append(f"- *(y {len(sa['files_touched']) - 15} mas...)*\n")
+                        content.append(f"- *(y {len(sa['files_touched']) - 15} más...)*\n")
                     content.append("\n")
 
                 # Respuesta final
@@ -3108,16 +3108,16 @@ class SessionProcessor:
         content = []
         content.append("# Memoria del Proyecto\n\n")
         content.append(f"**Archivos de memoria encontrados:** {len(self.memory_data)}\n\n")
-        content.append("*La memoria del proyecto contiene decisiones, lecciones tecnicas y preferencias persistentes entre sesiones de Claude Code.*\n\n")
+        content.append("*La memoria del proyecto contiene decisiones, lecciones técnicas y preferencias persistentes entre sesiones de Claude Code.*\n\n")
         content.append("---\n\n")
 
-        # Primero mostrar el indice si existe
+        # Primero mostrar el índice si existe
         if 'MEMORY.md' in self.memory_data:
-            content.append("## Indice de Memoria (MEMORY.md)\n\n")
+            content.append("## Índice de Memoria (MEMORY.md)\n\n")
             content.append(self.memory_data['MEMORY.md'])
             content.append("\n\n---\n\n")
 
-        # Luego los demas archivos
+        # Luego los demás archivos
         for filename, file_content in sorted(self.memory_data.items()):
             if filename == 'MEMORY.md':
                 continue
@@ -3223,10 +3223,10 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # ---- Detalle por sesion ----
-        content.append("## Consumo por Sesion\n\n")
+        # ---- Detalle por sesión ----
+        content.append("## Consumo por Sesión\n\n")
 
-        # Preparar datos de sesion para ordenar
+        # Preparar datos de sesión para ordenar
         session_rows = []
         for session in self.sessions_summary:
             tu = session.get('token_usage', {})
@@ -3236,7 +3236,7 @@ class SessionProcessor:
             cr = tu.get('cache_read', 0)
             session_total = inp + out + cc + cr
 
-            # Tokens de subagentes de esta sesion
+            # Tokens de subagentes de esta sesión
             sid = session['file'].replace('.jsonl', '')
             sa_list = [sa for sa in self.subagent_data if sa['session_id'] == sid]
             sa_inp = sum(sa['token_usage']['input_tokens'] for sa in sa_list)
@@ -3247,14 +3247,14 @@ class SessionProcessor:
 
             combined_total = session_total + sa_total
 
-            # Duracion de la sesion
+            # Duración de la sesión
             duration = self._calculate_interaction_duration(session.get('start_time', ''), session.get('end_time', ''))
 
             # Q&A count
             qa_count = sum(1 for qa in self.qa_pairs if qa['session_file'] == session['file'])
             ops_count = len(session['operations'])
 
-            # Metricas de eficiencia
+            # Métricas de eficiencia
             tokens_per_qa = combined_total / qa_count if qa_count > 0 else 0
             tokens_per_op = combined_total / ops_count if ops_count > 0 else 0
 
@@ -3285,7 +3285,7 @@ class SessionProcessor:
         session_rows.sort(key=lambda x: x['combined_total'], reverse=True)
 
         # Tabla resumen
-        content.append("| Sesion | Duracion | Q&A | Ops | Tokens Main | Tokens Sub | Total | Tok/Q&A | Tok/Op |\n")
+        content.append("| Sesión | Duración | Q&A | Ops | Tokens Main | Tokens Sub | Total | Tok/Q&A | Tok/Op |\n")
         content.append("|--------|----------|----:|----:|------------:|-----------:|------:|--------:|-------:|\n")
 
         for row in session_rows:
@@ -3299,19 +3299,19 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # ---- Detalle expandido por sesion ----
-        content.append("## Detalle por Sesion\n\n")
+        # ---- Detalle expandido por sesión ----
+        content.append("## Detalle por Sesión\n\n")
 
         for row in session_rows:
             content.append(f"### {row['session_id'][:16]}...\n\n")
             content.append(f"- **Periodo:** {self._format_timestamp(row['start_time'])}\n")
-            content.append(f"- **Duracion:** {row['duration'] or 'N/A'}\n")
+            content.append(f"- **Duración:** {row['duration'] or 'N/A'}\n")
             content.append(f"- **Mensajes totales:** {row['total_messages']}\n")
             content.append(f"- **Pares Q&A:** {row['qa_count']}\n")
             content.append(f"- **Operaciones:** {row['ops_count']}\n")
             content.append(f"- **Subagentes:** {row['sa_count']}\n\n")
 
-            content.append("**Tokens sesion principal:**\n")
+            content.append("**Tokens sesión principal:**\n")
             content.append(f"- Input: {row['main_input']:,}\n")
             content.append(f"- Output: {row['main_output']:,}\n")
             content.append(f"- Cache creation: {row['main_cache_create']:,}\n")
@@ -3327,9 +3327,9 @@ class SessionProcessor:
             content.append(f"**Total combinado:** {row['combined_total']:,}\n\n")
 
             # Eficiencia
-            content.append("**Metricas de eficiencia:**\n")
+            content.append("**Métricas de eficiencia:**\n")
             content.append(f"- Tokens por Q&A: {row['tokens_per_qa']:,.0f}\n")
-            content.append(f"- Tokens por operacion: {row['tokens_per_op']:,.0f}\n")
+            content.append(f"- Tokens por operación: {row['tokens_per_op']:,.0f}\n")
 
             # Cache efficiency
             main_cache_total = row['main_cache_create'] + row['main_cache_read']
@@ -3337,7 +3337,7 @@ class SessionProcessor:
                 hit_rate = row['main_cache_read'] / main_cache_total * 100
                 content.append(f"- Cache hit rate: {hit_rate:.1f}%\n")
 
-            # Output ratio (output / total - que porcentaje es output util vs input context)
+            # Output ratio (output / total - qué porcentaje es output útil vs input context)
             if row['combined_total'] > 0:
                 output_ratio = (row['main_output'] + row['sa_output']) / row['combined_total'] * 100
                 content.append(f"- Output ratio: {output_ratio:.1f}% (tokens de output / total)\n")
@@ -3352,11 +3352,11 @@ class SessionProcessor:
 
         # ---- Ranking de eficiencia ----
         content.append("## Ranking de Eficiencia\n\n")
-        content.append("*Sesiones ordenadas por tokens/Q&A (menor = mas eficiente):*\n\n")
+        content.append("*Sesiones ordenadas por tokens/Q&A (menor = más eficiente):*\n\n")
 
         ranked = sorted([r for r in session_rows if r['qa_count'] > 0], key=lambda x: x['tokens_per_qa'])
 
-        content.append("| # | Sesion | Tokens/Q&A | Q&A | Total Tokens | Duracion |\n")
+        content.append("| # | Sesión | Tokens/Q&A | Q&A | Total Tokens | Duración |\n")
         content.append("|---|--------|----------:|----:|-----------:|----------|\n")
 
         for i, row in enumerate(ranked, 1):
@@ -3385,7 +3385,7 @@ class SessionProcessor:
             tipo = 'subagent' if 'haiku' in model.lower() else ('compaction' if 'synthetic' in model.lower() else 'principal')
             content.append(f"| {model} | {count} | {tipo} |\n")
 
-        # v5.0: Consumo Pencil (diseno)
+        # v5.0: Consumo Pencil (diseño)
         if self.pencil_sessions:
             content.append("\n---\n\n")
             content.append("## Consumo Pencil (Agente de Diseño)\n\n")
@@ -3470,7 +3470,7 @@ class SessionProcessor:
             if not files:
                 continue
 
-            content.append(f"## Sesion: {session_id[:16]}...\n\n")
+            content.append(f"## Sesión: {session_id[:16]}...\n\n")
             content.append(f"**Archivos:** {len(files)}\n\n")
 
             # Categorizar archivos
@@ -3536,7 +3536,7 @@ class SessionProcessor:
 
         # Timeline of all codex invocations
         content.append("## Timeline de Invocaciones\n\n")
-        content.append("| # | Timestamp | Sesion Claude | Tipo | Descripcion | Match Codex | Tokens |\n")
+        content.append("| # | Timestamp | Sesión Claude | Tipo | Descripción | Match Codex | Tokens |\n")
         content.append("|---|-----------|---------------|------|-------------|-------------|--------|\n")
 
         sorted_invs = sorted(self.codex_invocations, key=lambda x: x['timestamp'] or '')
@@ -3558,7 +3558,7 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # Detailed expansion of each matched Codex session
+        # Detailed expansión of each matched Codex session
         content.append("# Detalle de Delegaciones Matcheadas\n\n")
 
         for idx, (tool_use_id, cs) in enumerate(sorted(self.codex_matched.items(),
@@ -3566,14 +3566,14 @@ class SessionProcessor:
             inv = cs['invocation']
             rollout = cs['rollout']
 
-            content.append(f"## Delegacion {idx}: {cs.get('title', cs.get('thread_name', ''))[:80]}\n\n")
+            content.append(f"## Delegación {idx}: {cs.get('title', cs.get('thread_name', ''))[:80]}\n\n")
 
             # Metadata
             content.append(f"- **Claude session:** `{inv['session_file']}` linea {inv['line_number']}\n")
             content.append(f"- **Codex thread:** `{cs['thread_id']}`\n")
             content.append(f"- **Modelo:** {cs.get('model', 'gpt-5.4')}\n")
             content.append(f"- **Tokens:** {cs.get('tokens_used', 0):,}\n")
-            content.append(f"- **Duracion:** {rollout.get('duration_str', '?')}\n")
+            content.append(f"- **Duración:** {rollout.get('duration_str', '?')}\n")
             content.append(f"- **Proyecto:** {cs.get('cwd', '?').split('/')[-1]}\n")
             content.append(f"- **Match temporal:** {cs['match_diff_seconds']:.0f}s de diferencia\n")
             content.append(f"- **Comandos ejecutados:** {len(rollout.get('function_calls', []))}\n")
@@ -3648,34 +3648,34 @@ class SessionProcessor:
     # ========================================================================
 
     def _generate_last_conversations_report(self, last_n):
-        """Genera reporte de las ultimas N conversaciones"""
+        """Genera reporte de las últimas N conversaciones"""
         output_file = self.output_dir / f"ultimas_{last_n}_conversaciones.md"
 
         sorted_qa = sorted(self.qa_pairs, key=lambda x: x['question_timestamp'], reverse=True)
         last_conversations = sorted_qa[:last_n]
 
         content = []
-        content.append(f"# Ultimas {last_n} Conversaciones con Operaciones de Archivos\n\n")
+        content.append(f"# Últimas {last_n} Conversaciones con Operaciones de Archivos\n\n")
         content.append(f"Total de conversaciones mostradas: {len(last_conversations)}\n\n")
-        content.append("*Este reporte muestra las ultimas conversaciones ordenadas cronologicamente (mas recientes primero).*\n")
+        content.append("*Este reporte muestra las últimas conversaciones ordenadas cronológicamente (más recientes primero).*\n")
         if self.subagent_data:
-            content.append("*Incluye actividad de subagentes vinculada a cada interaccion.*\n")
+            content.append("*Incluye actividad de subagentes vinculada a cada interacción.*\n")
         content.append("\n---\n\n")
 
         for i, qa in enumerate(last_conversations, 1):
-            content.append(f"## Conversacion #{i} (de las mas recientes)\n\n")
-            content.append(f"**Archivo de sesion:** {qa['session_file']}\n\n")
+            content.append(f"## Conversación #{i} (de las más recientes)\n\n")
+            content.append(f"**Archivo de sesión:** {qa['session_file']}\n\n")
 
             question_time = self._format_timestamp(qa['question_timestamp'])
             answer_time = self._format_timestamp(qa['answer_timestamp'])
             duration = self._calculate_interaction_duration(qa['question_timestamp'], qa['answer_timestamp'])
 
-            content.append("**Cronologia de la interaccion:**\n")
+            content.append("**Cronología de la interacción:**\n")
             content.append(f"- **Inicio (Usuario envia):** {question_time}\n")
             if qa['answer_timestamp']:
                 content.append(f"- **Fin (Sistema responde):** {answer_time}\n")
                 if duration:
-                    content.append(f"- **Duracion:** {duration}\n")
+                    content.append(f"- **Duración:** {duration}\n")
             else:
                 content.append("- **Fin:** Sin respuesta registrada\n")
             content.append("\n")
@@ -3698,7 +3698,7 @@ class SessionProcessor:
 
         full_content = ''.join(content)
         self._split_large_file(output_file, full_content)
-        print(f"  Reporte de las ultimas {last_n} conversaciones generado: {output_file.name}")
+        print(f"  Reporte de las últimas {last_n} conversaciones generado: {output_file.name}")
 
     def _generate_file_history_report(self, target_filename):
         """Genera reporte de historial completo de modificaciones para un archivo especifico"""
@@ -3721,7 +3721,7 @@ class SessionProcessor:
             if target_filename in raw_input_str:
                 file_operations.append({**op, 'origin': 'main'})
 
-        # v3.0: Buscar tambien en operaciones de subagentes
+        # v3.0: Buscar también en operaciones de subagentes
         for op in self.subagent_operations:
             file_path = self._extract_file_path_from_input(op.get('raw_input', {}))
             if file_path and (target_filename in file_path or file_path.endswith(target_filename)):
@@ -3731,10 +3731,10 @@ class SessionProcessor:
             if target_filename in details:
                 file_operations.append({**op, 'origin': f"subagent:{op['agent_id'][:8]}"})
 
-        # Ordenar cronologicamente
+        # Ordenar cronológicamente
         file_operations.sort(key=lambda x: x.get('timestamp') or '')
 
-        # Agrupar por conversacion
+        # Agrupar por conversación
         operations_by_qa = {}
         for op in file_operations:
             op_time = op.get('timestamp', '')
@@ -3780,7 +3780,7 @@ class SessionProcessor:
         content.append(f"**Archivo analizado:** `{target_filename}`\n")
         content.append(f"**Total de operaciones encontradas:** {len(file_operations)}\n")
         content.append(f"**Conversaciones que modificaron este archivo:** {len(operations_by_qa)}\n\n")
-        content.append("*Este reporte muestra todas las modificaciones historicas realizadas al archivo especificado, organizadas por conversacion.*\n\n")
+        content.append("*Este reporte muestra todas las modificaciones históricas realizadas al archivo especificado, organizadas por conversación.*\n\n")
         content.append("---\n\n")
 
         if not file_operations:
@@ -3795,7 +3795,7 @@ class SessionProcessor:
             self._split_large_file(output_file, full_content)
             return
 
-        # Estadisticas por tipo de operacion
+        # Estadisticas por tipo de operación
         operation_types = {}
         for op in file_operations:
             op_type = op.get('tool_name', 'unknown')
@@ -3810,7 +3810,7 @@ class SessionProcessor:
         main_ops = [op for op in file_operations if op.get('origin') == 'main']
         sa_ops = [op for op in file_operations if op.get('origin', '').startswith('subagent')]
         if main_ops and sa_ops:
-            content.append(f"- Operaciones desde sesion principal: {len(main_ops)}\n")
+            content.append(f"- Operaciones desde sesión principal: {len(main_ops)}\n")
             content.append(f"- Operaciones desde subagentes: {len(sa_ops)}\n\n")
 
         # Timeline
@@ -3822,15 +3822,15 @@ class SessionProcessor:
             qa = data['qa']
             ops = data['operations']
 
-            content.append(f"### Modificacion #{i}\n\n")
+            content.append(f"### Modificación #{i}\n\n")
 
             question_time = self._format_timestamp(qa['question_timestamp'])
             duration = self._calculate_interaction_duration(qa['question_timestamp'], qa['answer_timestamp'])
 
             content.append(f"**Fecha:** {question_time}\n")
-            content.append(f"**Sesion:** {qa['session_file']}\n")
-            content.append(f"**Duracion:** {duration if duration else 'N/A'}\n")
-            content.append(f"**Operaciones en esta conversacion:** {len(ops)}\n\n")
+            content.append(f"**Sesión:** {qa['session_file']}\n")
+            content.append(f"**Duración:** {duration if duration else 'N/A'}\n")
+            content.append(f"**Operaciones en esta conversación:** {len(ops)}\n\n")
 
             # Contexto
             content.append("#### Contexto - Usuario pregunto:\n")
@@ -3861,7 +3861,7 @@ class SessionProcessor:
                             if 'old_string' in raw_input and 'new_string' in raw_input:
                                 old_preview = raw_input['old_string'][:100] + '...' if len(raw_input['old_string']) > 100 else raw_input['old_string']
                                 new_preview = raw_input['new_string'][:100] + '...' if len(raw_input['new_string']) > 100 else raw_input['new_string']
-                                content.append(f"  {j}. **Edicion** ({op_time}){origin_tag}\n")
+                                content.append(f"  {j}. **Edición** ({op_time}){origin_tag}\n")
                                 content.append(f"     - **Reemplazo:** `{old_preview}`\n")
                                 content.append(f"     - **Por:** `{new_preview}`\n")
                             elif 'content' in raw_input:
@@ -3873,14 +3873,14 @@ class SessionProcessor:
                         else:
                             content.append(f"  {j}. **{tool}** ({op_time}){origin_tag} - {op.get('details', '')}\n")
                     elif tool == 'Read':
-                        content.append(f"  {j}. **Lectura** ({op_time}){origin_tag} - Archivo leido para analisis\n")
+                        content.append(f"  {j}. **Lectura** ({op_time}){origin_tag} - Archivo leído para análisis\n")
                     else:
                         content.append(f"  {j}. **{tool}** ({op_time}){origin_tag} - {op.get('details', '')}\n")
 
             content.append("\n")
 
             # Respuesta
-            content.append("#### Resultado de la conversacion:\n")
+            content.append("#### Resultado de la conversación:\n")
             answer_preview = qa['answer'][:300] + '...' if len(qa['answer']) > 300 else qa['answer']
             content.append(f"```\n{answer_preview}\n```\n\n")
 
@@ -3895,7 +3895,7 @@ class SessionProcessor:
     # ========================================================================
 
     def _format_timestamp(self, timestamp: str) -> str:
-        """Formatea un timestamp para mostrar de manera mas legible"""
+        """Formatea un timestamp para mostrar de manera más legible"""
         if not timestamp:
             return "N/A"
 
@@ -3909,7 +3909,7 @@ class SessionProcessor:
             return timestamp
 
     def _calculate_interaction_duration(self, start_time: str, end_time: str) -> str:
-        """Calcula la duracion de una interaccion entre dos timestamps"""
+        """Calcula la duración de una interacción entre dos timestamps"""
         if not start_time or not end_time:
             return None
 
@@ -3963,7 +3963,7 @@ class SessionProcessor:
         return operations_in_timeframe
 
     def _extract_operation_name(self, operation: Dict[str, Any]) -> str:
-        """Extrae el nombre de la operacion de forma simplificada"""
+        """Extrae el nombre de la operación de forma simplificada"""
         op_type = operation.get('operation_type', '')
         tool_name = operation.get('tool_name', '')
 
@@ -4046,7 +4046,7 @@ class SessionProcessor:
                 qwen_dates.add(s['start_time'][:10])
         overlap_dates = claude_dates & qwen_dates
         if overlap_dates:
-            content.append(f"- **Dias con actividad simultanea Claude+Qwen:** {len(overlap_dates)} ({', '.join(sorted(overlap_dates))})\n")
+            content.append(f"- **Días con actividad simultánea Claude+Qwen:** {len(overlap_dates)} ({', '.join(sorted(overlap_dates))})\n")
 
         content.append("\n---\n\n")
 
@@ -4062,7 +4062,7 @@ class SessionProcessor:
         content.append("\n---\n\n")
 
         # Detail per session
-        content.append("# Detalle por Sesion\n\n")
+        content.append("# Detalle por Sesión\n\n")
         for i, s in enumerate(self.qwen_sessions, 1):
             # Calculate duration
             duration = ''
@@ -4080,10 +4080,10 @@ class SessionProcessor:
                 except:
                     pass
 
-            content.append(f"## Sesion {i}: {s['session_id'][:16]}\n\n")
+            content.append(f"## Sesión {i}: {s['session_id'][:16]}\n\n")
             content.append(f"- **Fecha:** {s['start_time'][:19] if s['start_time'] else '?'}\n")
             if duration:
-                content.append(f"- **Duracion:** {duration}\n")
+                content.append(f"- **Duración:** {duration}\n")
             content.append(f"- **Modelo:** {s['model'] or '?'}\n")
             content.append(f"- **Branch:** {s['git_branch']}\n")
             content.append(f"- **CWD:** `{s['cwd']}`\n")
@@ -4128,7 +4128,7 @@ class SessionProcessor:
     # ========================================================================
 
     def _generate_pencil_report(self):
-        """Reporte de sesiones de diseno Pencil agrupadas por proyecto Claude,
+        """Reporte de sesiones de diseño Pencil agrupadas por proyecto Claude,
         con el Q&A completo (prompts del usuario + respuestas del agente)."""
         output_file = self.output_dir / "12_pencil_sesiones_diseno.md"
 
@@ -4141,7 +4141,7 @@ class SessionProcessor:
                 unmatched.append(s)
 
         content = []
-        content.append("# Sesiones de Diseno: Pencil (pen.dev)\n\n")
+        content.append("# Sesiones de Diseño: Pencil (pen.dev)\n\n")
         content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         content.append(f"- Sesiones procesadas: **{len(self.pencil_sessions)}**\n")
         content.append(f"- Vinculadas a un proyecto Claude: **{sum(len(v) for v in matched.values())}** "
@@ -4203,7 +4203,7 @@ class SessionProcessor:
             content.append(f"- **Ruta Claude:** `{proj}`\n")
             content.append(f"- **Sesiones Pencil:** {len(sess)} | "
                            f"**Total tokens:** {tot_tokens:,} | **Total costo:** ${tot_cost:.4f}\n\n")
-            content.append("**Cronologia:** " + '; '.join(
+            content.append("**Cronología:** " + '; '.join(
                 f"{(s['start_time'] or '')[:10]} {s['file'][:14]}" for s in sess) + "\n\n")
 
             for s in sess:
@@ -4212,7 +4212,7 @@ class SessionProcessor:
         if unmatched:
             content.append("---\n\n")
             content.append("## Sin proyecto identificable\n\n")
-            content.append("*Sesiones cuyo cwd no coincide con ningun proyecto Claude analizado "
+            content.append("*Sesiones cuyo cwd no coincide con ningún proyecto Claude analizado "
                            "(documentos gestionados de Pencil, cwd raiz, etc.).*\n\n")
             for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
                 render_session(s)
@@ -4247,9 +4247,9 @@ class SessionProcessor:
                 agg[dominant]['answered_turns'] += sum(1 for q in qas if q['assistant'])
 
         content = []
-        content.append("# Uso de Modelos en Diseno (Pencil)\n\n")
+        content.append("# Uso de Modelos en Diseño (Pencil)\n\n")
         content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        content.append("*Permite validar con que modelo de agente de diseno rinde mejor el trabajo: "
+        content.append("*Permite validar con que modelo de agente de diseño rinde mejor el trabajo: "
                        "costo por turno, tokens reasoning y tasa de turnos con respuesta de texto.*\n\n")
 
         content.append("| Modelo | Sesiones | Requests | Tokens totales | Output | Reasoning | Costo (USD) | $/turno | T. con respuesta |\n")
@@ -4268,8 +4268,8 @@ class SessionProcessor:
         content.append(f"\n**Total Pencil:** {tot['total']:,} tokens | costo ${tot['cost']:.4f} | "
                        f"{sum(a['requests'] for a in agg.values()):,} requests API\n\n")
 
-        content.append("---\n\n## Desglose por sesion\n\n")
-        content.append("| Sesion | Titulo | Proyecto | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
+        content.append("---\n\n## Desglose por sesión\n\n")
+        content.append("| Sesión | Título | Proyecto | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
         content.append("|--------|--------|----------|-------------------------|-------:|-------:|------:|\n")
         for s in sorted(self.pencil_sessions, key=lambda s: s['start_time'] or ''):
             top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['cost'])[:2]
@@ -4289,7 +4289,7 @@ class SessionProcessor:
     # ========================================================================
 
     def _generate_opencode_report(self):
-        """Sesiones OpenCode agrupadas por proyecto Claude: cronologia, reglas de
+        """Sesiones OpenCode agrupadas por proyecto Claude: cronología, reglas de
         matching y Q&A de las sesiones raiz (los sub-agentes se listan aparte)."""
         output_file = self.output_dir / "14_opencode_sesiones.md"
 
@@ -4378,7 +4378,7 @@ class SessionProcessor:
             content.append(f"- **Ruta Claude:** `{proj}`\n")
             content.append(f"- **Sesiones OpenCode:** {len(sess)} | "
                            f"**Total tokens:** {tot_tokens:,} | **Total costo:** ${tot_cost:.4f}\n\n")
-            content.append("**Cronologia:** " + '; '.join(
+            content.append("**Cronología:** " + '; '.join(
                 f"{(s['start_time'] or '')[:10]} {(s['title'] or s['session_id'])[:24]}"
                 + ("*" if s['subagent'] else "") for s in sess) + "\n")
             content.append("*\\* sub-agente (sesión hija de un `task`).*\n\n")
@@ -4389,8 +4389,8 @@ class SessionProcessor:
         if unmatched:
             content.append("---\n\n")
             content.append("## Sin proyecto identificable\n\n")
-            content.append("*Sesiones cuyo cwd/paths no coinciden con ningun proyecto Claude "
-                           "analizado (otros repos, sesion global, etc.).*\n\n")
+            content.append("*Sesiones cuyo cwd/paths no coinciden con ningún proyecto Claude "
+                           "analizado (otros repos, sesión global, etc.).*\n\n")
             for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
                 render_session(s)
 
@@ -4400,7 +4400,7 @@ class SessionProcessor:
 
     def _generate_opencode_models_report(self):
         """Uso de modelos OpenCode: tokens, costo, requests, tasa de turnos con
-        respuesta de texto y distribucion de herramientas."""
+        respuesta de texto y distribución de herramientas."""
         output_file = self.output_dir / "15_opencode_modelos_uso.md"
 
         agg = {}
@@ -4449,14 +4449,14 @@ class SessionProcessor:
                        f"{sum(a['requests'] for a in agg.values()):,} requests API\n\n")
 
         if tools:
-            content.append("---\n\n## Herramientas mas usadas\n\n")
+            content.append("---\n\n## Herramientas más usadas\n\n")
             content.append("| Tool | Llamadas |\n|------|---------:|\n")
             for t, c in sorted(tools.items(), key=lambda x: -x[1])[:30]:
                 content.append(f"| `{t}` | {c:,} |\n")
             content.append("\n")
 
-        content.append("---\n\n## Desglose por sesion\n\n")
-        content.append("| Sesion | Titulo | Proyecto | Agente | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
+        content.append("---\n\n## Desglose por sesión\n\n")
+        content.append("| Sesión | Título | Proyecto | Agente | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
         content.append("|--------|--------|----------|--------|-------------------------|-------:|-------:|------:|\n")
         for s in sorted(self.opencode_sessions, key=lambda s: s['start_time'] or ''):
             top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['cost'])[:2]
@@ -4475,7 +4475,7 @@ class SessionProcessor:
         print(f"  Reporte modelos OpenCode generado: {output_file.name}")
 
     def _generate_antigravity_report(self):
-        """Conversaciones Antigravity agrupadas por proyecto Claude: cronologia,
+        """Conversaciones Antigravity agrupadas por proyecto Claude: cronología,
         reglas de matching y Q&A."""
         output_file = self.output_dir / "16_antigravity_sesiones.md"
 
@@ -4550,7 +4550,7 @@ class SessionProcessor:
             content.append(f"- **Ruta Claude:** `{proj}`\n")
             content.append(f"- **Conversaciones Antigravity:** {len(sess)} | "
                            f"**Total tokens:** {tot_tokens:,}\n\n")
-            content.append("**Cronologia:** " + '; '.join(
+            content.append("**Cronología:** " + '; '.join(
                 f"{(s['start_time'] or '')[:10]} {(s['title'] or s['session_id'])[:24]}"
                 for s in sess) + "\n\n")
             for s in sess:
@@ -4559,7 +4559,7 @@ class SessionProcessor:
         if unmatched:
             content.append("---\n\n")
             content.append("## Sin proyecto identificable\n\n")
-            content.append("*Conversaciones cuyo workspace/paths no coinciden con ningun "
+            content.append("*Conversaciones cuyo workspace/paths no coinciden con ningún "
                            "proyecto Claude analizado.*\n\n")
             for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
                 render_session(s)
@@ -4569,8 +4569,8 @@ class SessionProcessor:
         print(f"  Reporte sesiones Antigravity generado: {output_file.name}")
 
     def _generate_antigravity_models_report(self):
-        """Uso de modelos Antigravity: generaciones, tokens por tipo, maximo de
-        contexto y distribucion de herramientas. La fuente no publica costo en $."""
+        """Uso de modelos Antigravity: generaciones, tokens por tipo, máximo de
+        contexto y distribución de herramientas. La fuente no publica costo en $."""
         output_file = self.output_dir / "17_antigravity_modelos_uso.md"
 
         agg = {}
@@ -4598,7 +4598,7 @@ class SessionProcessor:
         content = []
         content.append("# Uso de Modelos en Antigravity CLI (Google, agy)\n\n")
         content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        content.append("*Tokens de contexto acumulados por generacion (f5) y de salida (f3). "
+        content.append("*Tokens de contexto acumulados por generación (f5) y de salida (f3). "
                        "Antigravity no publica costo en dinero en sus datos locales.*\n\n")
 
         content.append("| Modelo | Conversaciones | Generaciones | Tokens totales | Contexto (suma) | Output | Reasoning | T. con respuesta |\n")
@@ -4615,14 +4615,14 @@ class SessionProcessor:
                        f"{sum(a['requests'] for a in agg.values()):,} generaciones\n\n")
 
         if tools:
-            content.append("---\n\n## Herramientas mas usadas\n\n")
+            content.append("---\n\n## Herramientas más usadas\n\n")
             content.append("| Tool | Llamadas |\n|------|---------:|\n")
             for t, c in sorted(tools.items(), key=lambda x: -x[1])[:30]:
                 content.append(f"| `{t}` | {c:,} |\n")
             content.append("\n")
 
-        content.append("---\n\n## Desglose por conversacion\n\n")
-        content.append("| Conversacion | Titulo | Proyecto | Workspace | Modelo(s) | Turnos | Tokens |\n")
+        content.append("---\n\n## Desglose por conversación\n\n")
+        content.append("| Conversación | Título | Proyecto | Workspace | Modelo(s) | Turnos | Tokens |\n")
         content.append("|--------------|--------|----------|-----------|-----------|-------:|-------:|\n")
         for s in sorted(self.antigravity_sessions, key=lambda s: s['start_time'] or ''):
             top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['requests'])[:2]
@@ -4639,7 +4639,7 @@ class SessionProcessor:
         print(f"  Reporte modelos Antigravity generado: {output_file.name}")
 
     def _split_large_file(self, file_path: Path, content: str, max_size_mb: int = 2):
-        """Divide archivos grandes en multiples partes si superan el tamano maximo"""
+        """Divide archivos grandes en múltiples partes si superan el tamaño maximo"""
         max_size_bytes = max_size_mb * 1024 * 1024
 
         content_bytes = content.encode('utf-8')
@@ -4662,8 +4662,8 @@ class SessionProcessor:
         base_name = file_path.stem
         index_file = file_path.parent / f"{base_name}_indice.md"
 
-        index_content = f"# Indice de {base_name}\n\n"
-        index_content += "Este archivo fue dividido en multiples partes debido a su tamano.\n\n"
+        index_content = f"# Índice de {base_name}\n\n"
+        index_content += "Este archivo fue dividido en múltiples partes debido a su tamaño.\n\n"
         index_content += "## Partes disponibles:\n\n"
 
         for i, line in enumerate(lines):
@@ -4698,16 +4698,16 @@ class SessionProcessor:
             print(f"    Creada parte {part_num}: {part_file.name}")
 
         index_content += f"\n**Total de partes:** {part_num}\n"
-        index_content += f"**Tamano original:** ~{len(content_bytes) / (1024*1024):.1f}MB\n"
+        index_content += f"**Tamaño original:** ~{len(content_bytes) / (1024*1024):.1f}MB\n"
 
         with open(index_file, 'w', encoding='utf-8') as f:
             f.write(index_content)
 
-        # Escribir el indice tambien en el archivo original para navegacion directa
+        # Escribir el índice también en el archivo original para navegación directa
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(index_content)
 
-        print(f"    Creado indice: {index_file.name}")
+        print(f"    Creado índice: {index_file.name}")
         print(f"    Archivo dividido en {part_num} partes")
 
     # ========================================================================
@@ -4723,9 +4723,9 @@ class SessionProcessor:
 
         if not jsonl_files:
             print(f"No se encontraron archivos .jsonl en {self.input_dir}")
-            # Aun asi procesar subagentes y memoria si existen directorios
+            # Aun así procesar subagentes y memoria si existen directorios
             if not no_subagents:
-                print("\nBuscando directorios de sesion...")
+                print("\nBuscando directorios de sesión...")
                 self._discover_session_directories()
                 if self.session_dirs:
                     print(f"\nProcesando subagentes...")
@@ -4786,9 +4786,9 @@ class SessionProcessor:
         # Crear pares Q&A
         self._create_qa_pairs()
 
-        # v3.0: Descubrir y procesar directorios de sesion
+        # v3.0: Descubrir y procesar directorios de sesión
         if not no_subagents:
-            print(f"\nDescubriendo directorios de sesion...")
+            print(f"\nDescubriendo directorios de sesión...")
             self._discover_session_directories()
 
             if self.session_dirs:
@@ -4867,7 +4867,7 @@ Ejemplos:
                         help='Directorio con archivos .jsonl o archivo individual (por defecto: \'.\')')
     parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.2.0')
     parser.add_argument('-o', '--output', help='Directorio de salida para reportes')
-    parser.add_argument('--last', type=int, help='Extraer las ultimas N conversaciones en un archivo separado')
+    parser.add_argument('--last', type=int, help='Extraer las últimas N conversaciones en un archivo separado')
     parser.add_argument('--file-history', help='Generar historial completo de modificaciones para un archivo especifico')
     parser.add_argument('--no-subagents', action='store_true',
                         help='No procesar subagentes ni tool-results (solo JSONL principales)')

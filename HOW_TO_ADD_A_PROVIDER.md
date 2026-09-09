@@ -81,7 +81,7 @@ CI matrices Python **3.8 → 3.13**: no usar walrus `:=`, `match`, ni genéricos
 ## Fase 5 — Docs y release
 
 1. `<HERRAMIENTA>_DATA_GUIDE.md` (estructura, tabla de eventos, matching, uso, performance).
-2. README: actualizar Descripcion + bullet de versioneo, ejemplo de uso (`### Funcionalidades vNEXT`), árbol de `reports/`, sección numerada de cada reporte nuevo (**renumerar las siguientes**), bloque "Datos de X (fuente externa)", `## Integracion con X`, opciones de CLI, "Deteccion Automatica", y "Actualizaciones" (mover "(Actual)").
+2. README: actualizar Descripción + bullet de versioneo, ejemplo de uso (`### Funcionalidades vNEXT`), árbol de `reports/`, sección numerada de cada reporte nuevo (**renumerar las siguientes**), bloque "Datos de X (fuente externa)", `## Integración con X`, opciones de CLI, "Deteccion Automatica", y "Actualizaciones" (mover "(Actual)").
 3. `pyproject.toml`: `version`, `description`, keywords.
 4. Validar end-to-end con un proyecto REAL del usuario:
    ```bash
