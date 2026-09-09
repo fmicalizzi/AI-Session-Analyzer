@@ -5,11 +5,11 @@
 [![Dependencies: Stdlib Only](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-brightgreen.svg)](requirements.txt)
 [![CI](https://github.com/fmicalizzi/AI-Session-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fmicalizzi/AI-Session-Analyzer/actions/workflows/ci.yml)
 
-Script y suite en Python para procesar, auditar y analizar sesiones de múltiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**, **Antigravity CLI**), extrayendo información clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
+Script y suite en Python para procesar, auditar y analizar sesiones de múltiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**, **Antigravity CLI**, **pi**), extrayendo información clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
 
 ## Descripción
 
-Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4) y la actividad **paralela** que otros agentes realizaron sobre los mismos proyectos: Qwen CLI, Pencil (pen.dev), OpenCode CLI y Antigravity CLI (Google). Las sesiones de estos últimos se **adjudican automáticamente** al proyecto Claude correspondiente (3 reglas auditables: cwd → paths → tiempo). Genera reportes detallados que incluyen:
+Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4) y la actividad **paralela** que otros agentes realizaron sobre los mismos proyectos: Qwen CLI, Pencil (pen.dev), OpenCode CLI, Antigravity CLI (Google) y pi (coding agent). Las sesiones de estos últimos se **adjudican automáticamente** al proyecto Claude correspondiente (3 reglas auditables: cwd → paths → tiempo). Genera reportes detallados que incluyen:
 - Histórico de mensajes del usuario
 - Respuestas del sistema
 - Pares de preguntas y respuestas
@@ -23,7 +23,8 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 - **v4.1:** Integración con Qwen CLI — visibilidad de actividad paralela en el mismo proyecto
 - **v5.0:** Integración con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicación inteligente al proyecto Claude (cwd/.pen/timestamps) + estadisticas por modelo
 - **v5.1:** Integración con OpenCode CLI — sesiones paralelas leídas de `opencode.db` (SQLite), Q&A + tokens/costo por modelo y adjudicación al proyecto Claude (cwd/paths/timestamps)
-- **v5.2 (Actual):** Integración con Antigravity CLI (Google, `agy`) — conversaciones leídas de `conversations/*.db` (SQLite + protobuf), Q&A + tokens/modelos y adjudicación al proyecto Claude (workspace/paths/timestamps)
+- **v5.2:** Integración con Antigravity CLI (Google, `agy`) — conversaciones leídas de `conversations/*.db` (SQLite + protobuf), Q&A + tokens/modelos y adjudicación al proyecto Claude (workspace/paths/timestamps)
+- **v5.3 (Actual):** Integración con **pi** (coding agent, [badlogic/pi-mono](https://github.com/badlogic/pi-mono)) — sesiones JSONL por proyecto (`~/.pi/agent/sessions/<cwd-codificado>/*.jsonl`), Q&A + tokens/costo **acumulado por modelo** (pi cambia de modelo a mitad de sesión) y adjudicación al proyecto Claude por el `cwd` del header de sesión → paths de tool calls → solapamiento temporal
 
 ## Instalación
 
@@ -118,11 +119,18 @@ python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode
 python3 process_sessions.py . -o reportes --antigravity-dir ~/.gemini/antigravity-cli/
 ```
 
+### Funcionalidades v5.3 (Integración pi)
+```bash
+# Incluir sesiones del coding agent pi, adjudicadas al proyecto Claude
+python3 process_sessions.py . -o reportes --pi-dir ~/.pi/agent/sessions/
+```
+
 ### Combinado completo (todos los agentes)
 ```bash
 python3 process_sessions.py . -o reportes \
   --codex-dir ~/.codex/ --qwen-dir ~/.qwen/ --pencil-dir ~/.pencil/ \
-  --opencode-dir ~/.local/share/opencode/ --antigravity-dir ~/.gemini/antigravity-cli/
+  --opencode-dir ~/.local/share/opencode/ --antigravity-dir ~/.gemini/antigravity-cli/ \
+  --pi-dir ~/.pi/agent/sessions/
 ```
 
 ### Ver todas las opciones
@@ -167,6 +175,8 @@ tu-proyecto/
     ├── 15_opencode_modelos_uso.md        # v5.1 (con --opencode-dir)
     ├── 16_antigravity_sesiones.md        # v5.2 (con --antigravity-dir)
     ├── 17_antigravity_modelos_uso.md     # v5.2 (con --antigravity-dir)
+    ├── 18_pi_sesiones.md                 # v5.3 (con --pi-dir)
+    ├── 19_pi_modelos_uso.md              # v5.3 (con --pi-dir)
     ├── log_operaciones_archivos.md
     ├── ultimas_N_conversaciones.md       (opcional con --last)
     └── historial_ARCHIVO.md              (opcional con --file-history)
@@ -236,12 +246,32 @@ Los BLOBs se decodifican con un lector wire-format genérico (sin schema, stdlib
 nunca se regexean los binarios completos y los tool-results (~100 KB) se descartan.
 Ver `ANTIGRAVITY_DATA_GUIDE.md` para el detalle.
 
+### Datos de pi (fuente externa, v5.3)
+```
+~/.pi/agent/sessions/                # Sesiones del CLI pi (--pi-dir)
+├── --Users-foo-Downloads-proj--/    # una carpeta por proyecto (cwd codificado con dobles guiones)
+│   └── {timestamp}_{uuid}.jsonl     # JSONL streaming "pi" v3, eventos encadenados por id/parentId
+└── ...
+```
+
+| Evento (`type`) | Contenido usado |
+|------|-----------|
+| `session` (línea 1) | `id`, `timestamp`, **`cwd`** ← fuente de verdad del proyecto (no se confia en el nombre de la carpeta) |
+| `model_change` | `provider`, `modelId` — pi puede cambiar de modelo a mitad de sesión |
+| `message` role=`user` | texto del prompt (se limpian marcadores de inyección) |
+| `message` role=`assistant` | `provider`/`model` **por mensaje**, `usage` (input/output/cacheRead/cacheWrite/totalTokens/`cost.total`) y `content[]` con `toolCall` (`name`, `arguments`) y `text` |
+| `message` role=`toolResult` | **no** cuenta como respuesta del asistente; solo se escanea para extraer rutas |
+
+Parseo **streaming línea a línea** (nunca `json.load()` del archivo), textos capados a
+12 KB por bloque y extracción de rutas con escaneo limitado (4 KB) + patrón compilado a
+nivel de clase. Ver `PI_DATA_GUIDE.md` para el detalle.
+
 ## Reportes Generados
 
 ### 1. Resumen de Sesiones (`00_resumen_sesiones.md`)
 - Estadisticas generales (mensajes, operaciones, Q&A)
 - v4.x: Estadisticas de Codex y Qwen
-- v5.x: Bloque "Agentes externos" — sesiones/turnos/tokens/costo de Pencil, OpenCode y Antigravity con cuantas quedaron adjudicadas a un proyecto Claude
+- v5.x: Bloque "Agentes externos" — sesiones/turnos/tokens/costo de Pencil, OpenCode, Antigravity y pi con cuantas quedaron adjudicadas a un proyecto Claude
 - v3.1: Tokens por sesión (input, output, cache creation, cache read)
 - v3.1: Modelo principal por sesión
 - v3.0: Conteo de subagentes por sesión
@@ -318,7 +348,7 @@ Reporte completo de consumo y eficiencia por sesión:
 - **Detalle por sesión:** Desglose de tokens, modelos usados, output ratio, cache efficiency
 - **Ranking de eficiencia:** Sesiones ordenadas por tokens/Q&A (menor = más eficiente)
 - **Uso de modelos global:** Que modelos se usaron, cuantas veces, tipo (principal/subagent/compaction)
-- **v5.x:** Secciones "Consumo Pencil", "Consumo OpenCode" y "Consumo Antigravity" (tokens/costo por agente; Antigravity solo tokens, su fuente no publica USD)
+- **v5.x:** Secciones "Consumo Pencil", "Consumo OpenCode", "Consumo Antigravity" y "Consumo pi" (tokens/costo por agente; Antigravity solo tokens, su fuente no publica USD)
 
 Ideal para:
 - Evaluar qué sesiones fueron más costosas y por qué
@@ -445,18 +475,43 @@ Estadisticas por modelo desde `gen_metadata` (fuente oficial de cada generación
 - Comparar Gemini vs Claude (la CLI alterna modelos según tarea) en consumo real
 - Detectar a qué proyecto fue cada conversación y con qué modelo se resolvió
 
-### 19. Log de Operaciones CSV (`log_operaciones_archivos.md`)
+### 19. Sesiones pi (`18_pi_sesiones.md`) - v5.3
+**Nuevo en v5.3! Requiere `--pi-dir`**
+
+Sesiones del coding agent pi agrupadas por proyecto Claude:
+- Cabecera por sesión con resumen: periodo, `cwd` del header, modelos usados (pi cambia de modelo en plena sesión), tokens/costo, tools y turnos Q&A
+- Regla de adjudicación reportada por sesión (`cwd`/`paths`/`tiempo`) con el score de prefijo
+- Cronología por proyecto + Q&A completo: prompt del usuario + respuesta del agente (los `toolResult` **no** cuentan como respuesta)
+- Sección final "Sin proyecto identificable" para auditoría de sesiones sueltas (p. ej. lanzadas desde `$HOME`)
+
+Útil para:
+- Reconstruir qué hizo `pi` en el mismo repo mientras Claude trabajaba
+- Recuperar prompts y respuestas completas de sesiones que quedaron solo en `~/.pi/`
+
+### 20. Uso de Modelos pi (`19_pi_modelos_uso.md`) - v5.3
+**Nuevo en v5.3! Requiere `--pi-dir`**
+
+Estadisticas por modelo, acumuladas desde el campo `model`/`usage` de cada mensaje
+assistant (no del `model_change` vigente): requests, tokens, costo USD, $/turno y tasa
+de turnos con respuesta de texto. Desglose por sesión con proyecto, `cwd` y modelos
+principales.
+
+Útil para:
+- Validar con qué modelo rinde mejor `pi` en este repo (y cuanto cuesta cada cambio de modelo a mitad de sesión)
+- Comparar el costo por turno entre modelos y contra Claude/OpenCode/Antigravity
+
+### 21. Log de Operaciones CSV (`log_operaciones_archivos.md`)
 Log simple compatible con Excel/Google Sheets:
 - **Formato**: `Operación;Ruta;Herramienta;Sesión;Timestamp;Origen`
 - v3.0: Columna `Origen` indica si es sesión principal o subagente
 - Importable: Usar `;` como separador en hojas de calculo
 
-### 20. Últimas N Conversaciones (`ultimas_N_conversaciones.md`)
+### 22. Últimas N Conversaciones (`ultimas_N_conversaciones.md`)
 **Generado con `--last N`**
 - Extrae las últimas N conversaciones más recientes
 - v3.0: Incluye subagentes vinculados a cada interacción
 
-### 21. Historial de Archivo (`historial_ARCHIVO.md`)
+### 23. Historial de Archivo (`historial_ARCHIVO.md`)
 **Generado con `--file-history FILENAME`**
 - Timeline completo de modificaciones de un archivo específico
 - v3.0: Incluye modificaciones hechas por subagentes
@@ -571,6 +626,26 @@ Con `--antigravity-dir`, el script:
 4. **Adjudica cada conversación** al proyecto Claude: workspace (regla cwd) → votación por rutas de tool calls → solapamiento temporal (reutiliza el motor de Pencil; cada conversación reporta la regla usada)
 5. **Genera** `16_antigravity_sesiones.md`, `17_antigravity_modelos_uso.md` y sección "Consumo Antigravity" en `09_eficiencia_tokens.md`
 
+## Integración con pi (v5.3)
+
+[pi](https://github.com/badlogic/pi-mono) es un coding agent CLI minimalista. Su formato
+de log (JSONL "pi" v3) es el mismo que Pencil embebe en `~/.pencil/pi-sessions/`, pero el
+CLI guarda sus sesiones en **`~/.pi/agent/sessions/<cwd-codificado>/*.jsonl`**: una
+carpeta por proyecto, con el cwd codificado a dobles guiones (`--Users-foo-proj--`).
+
+Con `--pi-dir`, el script:
+1. **Resuelve el directorio de sesiones** con tolerancia: acepta `~/.pi/`, `~/.pi/agent/` o `~/.pi/agent/sessions/` y recorre recursivamente las carpetas por-proyecto
+2. **Parsea en streaming** evento por evento (`for line in f`, nunca `json.load()`): el **`cwd` de la línea header** (`type:"session"`) es la fuente de verdad — no se asume la decodificación del nombre de carpeta
+3. **Reconstruye el Q&A** por turno: `user` → textos `assistant` (concatenando bloques `text`); `toolResult` nunca cuenta como respuesta del asistente
+4. **Acumula tokens/costo por modelo** según el campo `model` de cada mensaje assistant: pi puede cambiar de proveedor/modelo a mitad de sesión (`model_change`) y el ranking lo refleja
+5. **Adjudica cada sesión** al proyecto Claude: regla `cwd` (prefijo con contención real, `min_common=4`) → votación por rutas de `toolCall.arguments` (`path`, y rutas dentro de `command`) y tool-results → solapamiento temporal (reutiliza el motor de matching de Pencil; cada sesión reporta la regla usada)
+6. **Genera** `18_pi_sesiones.md`, `19_pi_modelos_uso.md` y sección "Consumo pi" en `09_eficiencia_tokens.md` (más el bloque "Agentes externos" en `00_resumen_sesiones.md`)
+
+**Sin duplicación con Pencil:** `--pencil-dir` lee `~/.pencil/pi-sessions/` y `--pi-dir` lee
+`~/.pi/agent/sessions/` — directorios disjuntos (la app de diseño vs. el CLI).
+
+Ver `PI_DATA_GUIDE.md` para documentación detallada del formato y el algoritmo de matching.
+
 ### Guías de integración
 
 | Guía | Contenido |
@@ -579,7 +654,8 @@ Con `--antigravity-dir`, el script:
 | `PENCIL_DATA_GUIDE.md` | Formato de datos de Pencil + algoritmo de adjudicación |
 | `OPENCODE_DATA_GUIDE.md` | Formato del SQLite de OpenCode (opencode.db) + reglas de adjudicación |
 | `ANTIGRAVITY_DATA_GUIDE.md` | Formato del SQLite+protobuf de Antigravity CLI (conversations/*.db) + reglas de adjudicación |
-| `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (Antigravity CLI, etc.) con trampas de performance ya conocidas |
+| `PI_DATA_GUIDE.md` | Formato del JSONL "pi" v3 del coding agent pi (~/.pi/agent/sessions) + reglas de adjudicación |
+| `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (Antigravity CLI, pi, etc.) con trampas de performance ya conocidas |
 
 ## Opciones de Linea de Comandos
 
@@ -590,6 +666,7 @@ usage: process_sessions.py [-h] [-v] [-o OUTPUT] [--last LAST]
                            [--pencil-dir PENCIL_DIR]
                            [--opencode-dir OPENCODE_DIR]
                            [--antigravity-dir ANTIGRAVITY_DIR]
+                           [--pi-dir PI_DIR]
                            [input_dir]
 
 Argumentos:
@@ -604,6 +681,7 @@ Argumentos:
   --pencil-dir DIR      Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño
   --opencode-dir DIR    Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas
   --antigravity-dir DIR Directorio de Antigravity CLI (~/.gemini/antigravity-cli/) para integrar sus conversaciones
+  --pi-dir DIR          Directorio de pi (~/.pi/agent/sessions/) para integrar sus sesiones de coding agent
 ```
 
 ## Características Técnicas
@@ -617,6 +695,7 @@ Argumentos:
 - v5.0: Adjudica sesiones Pencil al proyecto Claude por prefijo de cwd, votación por rutas .pen o solapamiento temporal
 - v5.1: Adjudica sesiones OpenCode (SQLite) al proyecto Claude por prefijo de cwd con contención real, votación por rutas de patches/tools o solapamiento temporal
 - v5.2: Adjudica conversaciones Antigravity CLI (SQLite+protobuf) al proyecto Claude por workspace de la trajectory, votación por rutas de tool calls o solapamiento temporal
+- v5.3: Adjudica sesiones del coding agent pi (JSONL por carpeta de proyecto) al proyecto Claude por el `cwd` de la línea header, votación por rutas de `toolCall.arguments` o solapamiento temporal
 - Procesa múltiples sesiones
 
 ### Extracción Inteligente
@@ -648,7 +727,20 @@ Argumentos:
 
 ## Actualizaciones
 
-### Versión 5.2 (Actual)
+### Versión 5.3 (Actual)
+- Integración con **pi** (coding agent, [badlogic/pi-mono](https://github.com/badlogic/pi-mono)) vía `--pi-dir`
+  (fuente: `~/.pi/agent/sessions/<cwd-codificado>/*.jsonl`, una carpeta por proyecto)
+- **Matching por el `cwd` de la línea header** (`type:"session"`), fuente de verdad sobre la
+  decodificación del nombre de carpeta; fallback por votación de rutas de `toolCall.arguments`
+  y solapamiento temporal (motor de Pencil reutilizado, regla reportada por sesión)
+- **Usage acumulado por modelo** desde el campo `model` de cada mensaje assistant: pi puede
+  cambiar de proveedor/modelo a mitad de sesión y el ranking `19_pi_modelos_uso.md` lo refleja
+- `toolResult` excluido del emparejamiento Q&A (nunca cuenta como respuesta del asistente)
+- Parseo streaming + cap de 12 KB por bloque de texto + extracción de rutas con escaneo limitado
+- Nuevos reportes `18_pi_sesiones.md` y `19_pi_modelos_uso.md`; secciones en `00` y `09`
+- Documentación: `PI_DATA_GUIDE.md` con el contrato del formato v3
+
+### Versión 5.2
 - Integración con Antigravity CLI (Google, `agy`) vía `--antigravity-dir`
   (fuente: `~/.gemini/antigravity-cli/conversations/*.db`, una base SQLite por conversación)
 - **Decoder wire-format protobuf genérico** (stdlib, sin schema): extrae prompts (step 14),
@@ -763,7 +855,7 @@ pytest
 ```
 
 La suite cubre el nucleo (Q&A, duraciones, split de archivos) y cada integración con su propia clase
-(`TestPencilIntegration`, `TestOpenCodeIntegration`, `TestAntigravityIntegration`): parseo con fixtures
+(`TestPencilIntegration`, `TestOpenCodeIntegration`, `TestAntigravityIntegration`, `TestPiIntegration`): parseo con fixtures
 sinteticos (JSONL, SQLite `session→message→part` y SQLite+protobuf según el caso), las 3 reglas de
 adjudicación (cwd/paths/tiempo), los reportes generados y la degradación silenciosa ante fuentes faltantes.
 
@@ -774,7 +866,7 @@ El procedimiento para sumar un agente nuevo está documentado en `HOW_TO_ADD_A_P
 ## Desarrollado para
 
 Desarrolladores, Project Managers y equipos que:
-- Trabajan con múltiples agentes de IA (Claude, Codex, Qwen, Pencil, OpenCode, Antigravity CLI) en los mismos proyectos
+- Trabajan con múltiples agentes de IA (Claude, Codex, Qwen, Pencil, OpenCode, Antigravity CLI, pi) en los mismos proyectos
 - Necesitan documentar procesos de desarrollo asistidos por IA
 - Quieren visibilidad completa de lo que hizo cada agente
 - Buscan generar reportes técnicos automaticos
@@ -788,4 +880,4 @@ Desarrolladores, Project Managers y equipos que:
 
 **Pro Tip v4.1**: Con `--qwen-dir ~/.qwen/`, el reporte `11_qwen_paralelo.md` muestra la actividad de Qwen en el mismo proyecto, con correlación temporal para ver qué días ambos agentes estaban trabajando en paralelo.
 
-**Pro Tip v5.x**: Pasando `--pencil-dir`/`--opencode-dir`/`--antigravity-dir` a la vez, los reportes `12_` a `17_` agrupan cada sesión externa **bajo su proyecto Claude** y muestran la regla de adjudicación usada (`cwd`/`paths`/`tiempo`). Si una sesión cae en "Sin proyecto identificable", la regla `tiempo` habra fallado por ambiguedad: revisa su workspace y sus rutas reales antes de desconfiar del matching.
+**Pro Tip v5.x**: Pasando `--pencil-dir`/`--opencode-dir`/`--antigravity-dir`/`--pi-dir` a la vez, los reportes `12_` a `19_` agrupan cada sesión externa **bajo su proyecto Claude** y muestran la regla de adjudicación usada (`cwd`/`paths`/`tiempo`). Si una sesión cae en "Sin proyecto identificable", la regla `tiempo` habra fallado por ambiguedad: revisa su workspace y sus rutas reales antes de desconfiar del matching.

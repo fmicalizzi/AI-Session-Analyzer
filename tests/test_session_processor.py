@@ -685,6 +685,219 @@ class TestAntigravityIntegration(unittest.TestCase):
         self.assertIn("proyecto Claude: 3", r00)
 
 
+class TestPiIntegration(unittest.TestCase):
+    PROJECT = "/Users/tester/dev/proj-app"
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.input_dir = Path(self.temp_dir) / "sessions"
+        self.output_dir = Path(self.temp_dir) / "reports"
+        self.input_dir.mkdir(parents=True)
+        self.pi_root = Path(self.temp_dir) / ".pi"
+        self.sessions_dir = self.pi_root / "agent" / "sessions"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _events(self, cwd="/Users/tester/dev/proj-app/src/module"):
+        return [
+            {"type": "session", "version": 3, "id": "pi-uuid-1",
+             "timestamp": "2026-09-09T03:45:03.295Z", "cwd": cwd},
+            {"type": "model_change", "id": "m1", "parentId": None,
+             "timestamp": "2026-09-09T03:45:03.341Z",
+             "provider": "github-copilot", "modelId": "gpt-5.4"},
+            {"type": "thinking_level_change", "id": "t1", "parentId": "m1",
+             "timestamp": "2026-09-09T03:45:03.341Z", "thinkingLevel": "medium"},
+            {"type": "model_change", "id": "m2", "parentId": "t1",
+             "timestamp": "2026-09-09T03:46:52.400Z",
+             "provider": "opencode-go", "modelId": "qwen3.8-flash"},
+            {"type": "message", "id": "u1", "parentId": "m2",
+             "timestamp": "2026-09-09T03:47:00.000Z",
+             "message": {"role": "user", "content": [
+                 {"type": "text", "text": "arregla el bug"}]}},
+            {"type": "message", "id": "a1", "parentId": "u1",
+             "timestamp": "2026-09-09T03:47:05.000Z",
+             "message": {"role": "assistant", "provider": "opencode-go",
+                         "model": "qwen3.8-flash",
+                         "usage": {"input": 10, "output": 200, "cacheRead": 500,
+                                   "cacheWrite": 90, "totalTokens": 800,
+                                   "cost": {"total": 0.002}},
+                         "content": [
+                             {"type": "thinking", "thinking": "veo..."},
+                             {"type": "toolCall", "name": "bash",
+                              "arguments": {"command": "cat /Users/tester/dev/proj-app/src/app.py | head"}}]}},
+            {"type": "message", "id": "r1", "parentId": "a1",
+             "timestamp": "2026-09-09T03:47:06.000Z",
+             "message": {"role": "toolResult", "toolName": "bash", "isError": False,
+                         "content": [{"type": "text",
+                                      "text": "print('holamundo') /Users/tester/other/file.txt"}]}},
+            {"type": "message", "id": "a2", "parentId": "r1",
+             "timestamp": "2026-09-09T03:47:10.000Z",
+             "message": {"role": "assistant", "provider": "opencode-go",
+                         "model": "qwen3.8-flash",
+                         "usage": {"input": 5, "output": 50, "totalTokens": 55,
+                                   "cost": {"total": 0.001}},
+                         "content": [
+                             {"type": "toolCall", "name": "edit",
+                              "arguments": {"path": "/Users/tester/dev/proj-app/src/app.py"}},
+                             {"type": "text", "text": "Listo, bug arreglado."}]}},
+        ]
+
+    def _write_session(self, events, folder="--Users-tester-dev-proj-app--",
+                       name="2026-09-09T03-45-03-295Z_pi-uuid-1.jsonl"):
+        d = self.sessions_dir / folder
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / name
+        f.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+        return f
+
+    def _processor_with_claude_cwd(self):
+        sp = SessionProcessor(str(self.input_dir), str(self.output_dir))
+        sp.user_messages.append({"cwd": self.PROJECT, "timestamp": "2026-09-09T03:00:00.000Z"})
+        sp.assistant_responses.append({"cwd": self.PROJECT, "timestamp": "2026-09-09T04:00:00.000Z"})
+        return sp
+
+    def test_parse_pi_session(self):
+        f = self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        s = sp._parse_pi_session(f)
+        self.assertEqual(s["session_id"], "pi-uuid-1")
+        self.assertEqual(s["cwd"], self.PROJECT + "/src/module")
+        self.assertEqual(s["start_time"], "2026-09-09T03:45:03.295Z")
+        self.assertEqual(s["provider"], "opencode-go")
+        self.assertEqual(s["usage"]["total"], 855)
+        self.assertAlmostEqual(s["usage"]["cost"], 0.003)
+        self.assertEqual(s["tool_calls"], {"bash": 1, "edit": 1})
+        # toolCall.arguments.path + rutas dentro de command y toolResult
+        self.assertIn("/Users/tester/dev/proj-app/src/app.py", s["external_paths"])
+        self.assertIn("/Users/tester/other/file.txt", s["external_paths"])
+
+    def test_qa_pairing_toolresult_not_assistant(self):
+        f = self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        s = sp._parse_pi_session(f)
+        self.assertEqual(len(s["qa_pairs"]), 1)
+        qa = s["qa_pairs"][0]
+        self.assertEqual(qa["user"], "arregla el bug")
+        self.assertEqual(qa["assistant"], "Listo, bug arreglado.")
+        # el toolResult no se mezcla en la respuesta ni genera turno propio
+        self.assertNotIn("holamundo", qa["assistant"])
+        # usage acumulado por modelo: los dos assistants son qwen3.8-flash
+        self.assertEqual(s["model_usage"]["qwen3.8-flash"]["requests"], 2)
+
+    def test_usage_accumulates_per_model(self):
+        f = self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        s = sp._parse_pi_session(f)
+        self.assertEqual(s["models_used"]["qwen3.8-flash"], 2)
+        mu = s["model_usage"]["qwen3.8-flash"]
+        self.assertEqual(mu["total"], 855)
+        self.assertEqual(mu["input"], 15)
+        self.assertEqual(mu["output"], 250)
+        self.assertAlmostEqual(mu["cost"], 0.003)
+
+    def test_text_cap(self):
+        events = self._events()
+        events[4]["message"]["content"][0]["text"] = "x" * (SessionProcessor.PI_TEXT_CAP + 500)
+        f = self._write_session(events)
+        sp = self._processor_with_claude_cwd()
+        s = sp._parse_pi_session(f)
+        self.assertLessEqual(len(s["qa_pairs"][0]["user"]),
+                             SessionProcessor.PI_TEXT_CAP + 60)
+        self.assertIn("caracteres", s["qa_pairs"][0]["user"])
+
+    def test_error_turn_annotated(self):
+        events = self._events()
+        # turno sin texto pero con errorMessage (API error real de pi)
+        events.append({"type": "message", "id": "u2", "parentId": "a2",
+                       "timestamp": "2026-09-09T03:48:00.000Z",
+                       "message": {"role": "user",
+                                   "content": [{"type": "text", "text": "y ahora?"}]}})
+        events.append({"type": "message", "id": "a3", "parentId": "u2",
+                       "timestamp": "2026-09-09T03:48:05.000Z",
+                       "message": {"role": "assistant", "model": "qwen3.8-flash",
+                                   "errorMessage": "OpenAI API error (400): model not available",
+                                   "stopReason": "error", "usage": {}, "content": []}})
+        f = self._write_session(events)
+        sp = self._processor_with_claude_cwd()
+        s = sp._parse_pi_session(f)
+        self.assertEqual(len(s["qa_pairs"]), 2)
+        self.assertEqual(s["qa_pairs"][0]["assistant"], "Listo, bug arreglado.")
+        self.assertIn("API error", s["qa_pairs"][1]["assistant"])
+        self.assertIn("model not available", s["qa_pairs"][1]["assistant"])
+
+    def test_load_and_match_by_cwd_header(self):
+        self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        sp._load_pi_sessions(str(self.pi_root))
+        self.assertEqual(len(sp.pi_sessions), 1)
+        s = sp.pi_sessions[0]
+        self.assertEqual(s["project"], self.PROJECT)
+        self.assertEqual(s["match_rule"], "cwd")
+        self.assertTrue(s["rel_path"].endswith(".jsonl"))
+
+    def test_match_by_paths_fallback(self):
+        events = self._events(cwd="/tmp/pi-scratch/unknown")
+        self._write_session(events)
+        sp = self._processor_with_claude_cwd()
+        sp._load_pi_sessions(str(self.sessions_dir))  # variante: base ya es sessions/
+        s = sp.pi_sessions[0]
+        self.assertEqual(s["project"], self.PROJECT)
+        self.assertEqual(s["match_rule"], "paths")
+
+    def test_no_match_goes_unmatched(self):
+        events = self._events(cwd="/Users/other/elsewhere")
+        for e in events:
+            m = e.get("message") if isinstance(e.get("message"), dict) else None
+            if m:
+                c = m.get("content")
+                if isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict):
+                            if b.get("type") == "toolCall":
+                                b["arguments"] = {"command": "echo hola"}
+                            if b.get("type") == "text" and m.get("role") == "toolResult":
+                                b["text"] = "sin rutas aca"
+        self._write_session(events)
+        sp = self._processor_with_claude_cwd()
+        sp._load_pi_sessions(str(self.pi_root))
+        s = sp.pi_sessions[0]
+        self.assertIsNone(s["project"])
+        self.assertIsNone(s["match_rule"])
+
+    def test_pi_reports_generated(self):
+        self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        sp._load_pi_sessions(str(self.pi_root))
+        sp._generate_pi_report()
+        sp._generate_pi_models_report()
+        r18 = self.output_dir / "18_pi_sesiones.md"
+        r19 = self.output_dir / "19_pi_modelos_uso.md"
+        self.assertTrue(r18.exists())
+        self.assertTrue(r19.exists())
+        c18 = r18.read_text(encoding="utf-8")
+        self.assertIn("arregla el bug", c18)
+        self.assertIn("Listo, bug arreglado.", c18)
+        self.assertIn("regla: `cwd`", c18)
+        self.assertIn("pi-uuid-1", c18)
+        c19 = r19.read_text(encoding="utf-8")
+        self.assertIn("qwen3.8-flash", c19)
+        self.assertIn("Total pi", c19)
+
+    def test_summary_report_includes_pi(self):
+        self._write_session(self._events())
+        sp = self._processor_with_claude_cwd()
+        sp._load_pi_sessions(str(self.pi_root))
+        sp._generate_sessions_summary()
+        r00 = (self.output_dir / "00_resumen_sesiones.md").read_text(encoding="utf-8")
+        self.assertIn("pi (coding agent)", r00)
+
+    def test_missing_dir_degrades_quietly(self):
+        sp = SessionProcessor(str(self.input_dir), str(self.output_dir))
+        sp._load_pi_sessions(str(Path(self.temp_dir) / "inexistente"))
+        self.assertEqual(sp.pi_sessions, [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

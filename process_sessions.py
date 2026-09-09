@@ -89,6 +89,11 @@ class SessionProcessor:
         self.antigravity_sessions = []   # Conversaciones parseadas de conversations/*.db
         self.antigravity_projects = []   # CWDs detectados en sesiones Claude (para matching)
 
+        # v5.3: pi (coding agent) integration
+        self.pi_dir = None
+        self.pi_sessions = []            # Sesiones parseadas de ~/.pi/agent/sessions/**/*.jsonl
+        self.pi_projects = []            # CWDs detectados en sesiones Claude (para matching)
+
     # ========================================================================
     # PROCESAMIENTO PRINCIPAL - Sesiones principales
     # ========================================================================
@@ -2417,6 +2422,266 @@ class SessionProcessor:
               f"(con proyecto Claude: {matched}, sin proyecto: "
               f"{len(self.antigravity_sessions) - matched})")
 
+    # ========================================================================
+    # V5.3: INTEGRACIÓN PI (coding agent) - ~/.pi/agent/sessions/**/*.jsonl
+    # ========================================================================
+
+    PI_TEXT_CAP = 12000        # chars por bloque de texto (user/assistant) al parsear
+    PI_ARG_SCAN = 4000         # chars escaneados por string de toolCall arguments
+    PI_PATH_ARG_KEYS = ('path', 'filePath', 'file_path', 'file')
+    PI_PATH_RE = None          # compilado perezosamente
+
+    def _pi_extract_paths(self, text: str, out: set):
+        """Rutas absolutas desde un string potencialmente MB: scan limitado al cap."""
+        import re
+        if not text:
+            return
+        if SessionProcessor.PI_PATH_RE is None:
+            SessionProcessor.PI_PATH_RE = re.compile(r'/(?:Users|home)/[^\s"\'`,)\]}]+')
+        for m in SessionProcessor.PI_PATH_RE.finditer(text[:self.PI_ARG_SCAN]):
+            out.add(m.group(0))
+
+    def _pi_cap_text(self, text: str) -> str:
+        if text and len(text) > self.PI_TEXT_CAP:
+            return text[:self.PI_TEXT_CAP] + f"\n\n[... {len(text):,} caracteres ...]"
+        return text
+
+    def _parse_pi_session(self, file_path: Path) -> Optional[Dict]:
+        """Parsea un .jsonl de pi (formato pi v3) en streaming.
+        El cwd del header (primera línea) es la fuente de verdad para el matching;
+        el usage/costo vive en message.usage de cada assistant y se acumula por
+        modelo (pi puede cambiar de modelo a mitad de sesión)."""
+        session = {
+            'file': file_path.name,
+            'rel_path': file_path.name,
+            'session_id': '',
+            'cwd': '',
+            'start_time': None,
+            'end_time': None,
+            'provider': '',
+            'models_used': {},          # {model: n_requests}
+            'model_usage': {},          # {model: {input,output,reasoning,total,cost,requests}}
+            'qa_pairs': [],             # [{'user','assistant','ts_user','ts_assistant'}]
+            'tool_calls': {},           # {name: count}
+            'external_paths': set(),
+            'usage': {'input': 0, 'output': 0, 'reasoning': 0, 'cache_read': 0,
+                      'cache_write': 0, 'total': 0, 'cost': 0.0},
+            'total_lines': 0,
+            'project': None,
+            'match_rule': None,
+            'match_score': 0,
+        }
+        current_model = ''
+        pending_user = None        # (text, ts)
+        pending_assistant = []     # textos del turno actual
+        pending_error = ''         # errorMessage del turno (API/stopReason=error)
+
+        def close_turn(ts_close):
+            txt = '\n\n'.join(pending_assistant)
+            if pending_error:
+                note = f"_(API error: {pending_error})_"
+                txt = f"{txt}\n\n{note}" if txt else note
+            session['qa_pairs'].append({
+                'user': pending_user[0], 'assistant': txt,
+                'ts_user': pending_user[1], 'ts_assistant': ts_close,
+            })
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+
+                    session['total_lines'] += 1
+                    dtype = data.get('type', '')
+                    ts = data.get('timestamp', '')
+                    if ts:
+                        if not session['start_time']:
+                            session['start_time'] = ts
+                        session['end_time'] = ts
+
+                    if dtype == 'session':
+                        session['session_id'] = data.get('id', file_path.stem)
+                        session['cwd'] = data.get('cwd', '')
+                        continue
+
+                    if dtype == 'model_change':
+                        current_model = f"{data.get('provider', '')}/{data.get('modelId', '')}".strip('/')
+                        session['provider'] = data.get('provider', session['provider'])
+                        continue
+
+                    if dtype != 'message':
+                        continue  # thinking_level_change y futuros: ignorar
+
+                    msg = data.get('message', {})
+                    role = msg.get('role', '')
+                    content = msg.get('content', [])
+                    if isinstance(content, str):
+                        content = [{'type': 'text', 'text': content}]
+
+                    if role == 'user':
+                        texts = [c.get('text', '') for c in content
+                                 if isinstance(c, dict) and c.get('type') == 'text']
+                        clean = self._clean_pencil_user_text(
+                            self._pi_cap_text('\n'.join(texts)))
+                        for t in texts:
+                            self._pi_extract_paths(t, session['external_paths'])
+                        if pending_user:
+                            close_turn(ts)
+                        pending_user = (clean, ts) if clean else None
+                        pending_assistant = []
+                        pending_error = ''
+
+                    elif role == 'assistant':
+                        if msg.get('errorMessage') and not pending_error:
+                            pending_error = str(msg.get('errorMessage'))[:200]
+                        model = msg.get('model') or current_model
+                        usage = msg.get('usage') or {}
+                        if model:
+                            session['models_used'][model] = session['models_used'].get(model, 0) + 1
+                            mu = session['model_usage'].setdefault(model, {
+                                'input': 0, 'output': 0, 'reasoning': 0,
+                                'total': 0, 'cost': 0.0, 'requests': 0})
+                            mu['input'] += usage.get('input', 0)
+                            mu['output'] += usage.get('output', 0)
+                            mu['reasoning'] += usage.get('reasoning', 0)
+                            mu['total'] += usage.get('totalTokens', 0)
+                            mu['cost'] += (usage.get('cost') or {}).get('total', 0)
+                            mu['requests'] += 1
+                        u = session['usage']
+                        u['input'] += usage.get('input', 0)
+                        u['output'] += usage.get('output', 0)
+                        u['reasoning'] += usage.get('reasoning', 0)
+                        u['cache_read'] += usage.get('cacheRead', 0)
+                        u['cache_write'] += usage.get('cacheWrite', 0)
+                        u['total'] += usage.get('totalTokens', 0)
+                        u['cost'] += (usage.get('cost') or {}).get('total', 0)
+                        for c in content:
+                            if not isinstance(c, dict):
+                                continue
+                            if c.get('type') == 'toolCall':
+                                name = c.get('name', '?')
+                                session['tool_calls'][name] = session['tool_calls'].get(name, 0) + 1
+                                args = c.get('arguments') or {}
+                                if isinstance(args, dict):
+                                    for k in self.PI_PATH_ARG_KEYS:
+                                        v = args.get(k)
+                                        if isinstance(v, str) and v:
+                                            session['external_paths'].add(v)
+                                    for v in args.values():
+                                        if isinstance(v, str):
+                                            self._pi_extract_paths(v, session['external_paths'])
+                            elif c.get('type') == 'text':
+                                t = c.get('text', '').strip()
+                                if t:
+                                    pending_assistant.append(self._pi_cap_text(t))
+                        if pending_user and pending_assistant:
+                            close_turn(ts)
+                            pending_user = None
+                            pending_assistant = []
+                            pending_error = ''
+
+                    elif role == 'toolResult':
+                        # NO es una respuesta del asistente: solo señal de rutas
+                        res = msg.get('content', [])
+                        if isinstance(res, list):
+                            for c in res:
+                                if isinstance(c, dict) and c.get('type') == 'text':
+                                    self._pi_extract_paths(c.get('text', ''),
+                                                            session['external_paths'])
+
+            if pending_user:
+                close_turn(None)
+
+        except Exception as e:
+            print(f"    Error parseando {file_path.name}: {e}")
+            return None
+
+        session['external_paths'] = {p for p in session['external_paths']
+                                     if len(self._path_segments(p)) >= 3}
+        return session
+
+    def _match_pi_project(self, session: Dict[str, Any]):
+        """Adjudica proyecto Claude a una sesión pi.
+        Regla 1: prefijo con contención real sobre el cwd del header.
+        Regla 2: votación por rutas de toolCall.arguments/toolResults.
+        Regla 3: desempate temporal con mensajes Claude."""
+        proj, score = self._best_project_match(session.get('cwd', ''),
+                                               projects=self.pi_projects)
+        if proj:
+            return proj, 'cwd', score
+
+        votes = {}
+        for p in session.get('external_paths', []):
+            cand, sc = self._best_project_match(p, projects=self.pi_projects)
+            if cand and sc > votes.get(cand, 0):
+                votes[cand] = sc
+        if votes:
+            best = max(votes, key=votes.get)
+            if list(votes.values()).count(votes[best]) == 1:
+                return best, 'paths', votes[best]
+
+        start = session.get('start_time')
+        end = session.get('end_time')
+        if start and end:
+            overlap = {}
+            for msg in self.user_messages + self.assistant_responses:
+                c = msg.get('cwd', '')
+                ts = msg.get('timestamp', '')
+                if c and ts and not (end < ts or start > ts):
+                    overlap[c] = overlap.get(c, 0) + 1
+            if overlap:
+                best_cwd = max(overlap, key=overlap.get)
+                proj, sc = self._best_project_match(best_cwd, min_common=0,
+                                                    projects=self.pi_projects)
+                if proj:
+                    return proj, 'tiempo', sc
+
+        return None, None, 0
+
+    def _load_pi_sessions(self, pi_dir: str):
+        """Carga sesiones del CLI pi (JSONL por proyecto) y las adjudica a proyectos
+        Claude. Acepta ~/.pi/, ~/.pi/agent/ o ~/.pi/agent/sessions/."""
+        base = Path(pi_dir).expanduser().resolve()
+        sessions_root = None
+        if (base / 'agent' / 'sessions').exists():
+            sessions_root = base / 'agent' / 'sessions'
+        elif (base / 'sessions').exists() and any((base / 'sessions').rglob('*.jsonl')):
+            sessions_root = base / 'sessions'
+        elif base.exists() and any(base.rglob('*.jsonl')):
+            sessions_root = base
+        if sessions_root is None:
+            print(f"  WARN: no encontré sesiones de pi bajo {pi_dir} "
+                  f"(busqué agent/sessions/, sessions/ o *.jsonl)")
+            return
+
+        self.pi_projects = self._collect_claude_project_cwds()
+        chat_files = sorted(sessions_root.rglob('*.jsonl'))
+        print(f"  Sesiones pi encontradas: {len(chat_files)} "
+              f"(en {sessions_root}) | proyectos Claude: {len(self.pi_projects)}")
+
+        for cf in chat_files:
+            s = self._parse_pi_session(cf)
+            if not s:
+                continue
+            try:
+                s['rel_path'] = str(cf.resolve().relative_to(sessions_root))
+            except Exception:
+                pass
+            proj, rule, score = self._match_pi_project(s)
+            s['project'], s['match_rule'], s['match_score'] = proj, rule, score
+            self.pi_sessions.append(s)
+
+        matched = sum(1 for s in self.pi_sessions if s['project'])
+        print(f"  Sesiones pi parseadas: {len(self.pi_sessions)} "
+              f"(con proyecto Claude: {matched}, sin proyecto: "
+              f"{len(self.pi_sessions) - matched})")
+
 
     # ========================================================================
     # GENERACIÓN DE REPORTES
@@ -2469,6 +2734,11 @@ class SessionProcessor:
             self._generate_antigravity_report()
             self._generate_antigravity_models_report()
 
+        # v5.3: Reportes pi (coding agent)
+        if self.pi_sessions:
+            self._generate_pi_report()
+            self._generate_pi_models_report()
+
         print(f"Reportes generados exitosamente en {self.output_dir}")
         print(f"{len(os.listdir(self.output_dir))} archivos creados")
 
@@ -2520,12 +2790,14 @@ class SessionProcessor:
             content.append(f"- **Mensajes Qwen:** {total_qwen_msgs}\n")
             content.append(f"- **Comandos Qwen:** {total_qwen_tools}\n")
 
-        # v5.x: agentes externos con adjudicación al proyecto (Pencil/OpenCode/Antigravity)
-        if self.pencil_sessions or self.opencode_sessions or self.antigravity_sessions:
+        # v5.x: agentes externos con adjudicación al proyecto (Pencil/OpenCode/Antigravity/pi)
+        if self.pencil_sessions or self.opencode_sessions or self.antigravity_sessions \
+                or self.pi_sessions:
             content.append("\n### Agentes externos (v5.x)\n\n")
             for name, sess in (('Pencil', self.pencil_sessions),
                                ('OpenCode', self.opencode_sessions),
-                               ('Antigravity CLI', self.antigravity_sessions)):
+                               ('Antigravity CLI', self.antigravity_sessions),
+                               ('pi (coding agent)', self.pi_sessions)):
                 if not sess:
                     continue
                 n_matched = sum(1 for x in sess if x['project'])
@@ -3448,6 +3720,27 @@ class SessionProcessor:
             content.append(f"| **Total tokens** | **{a_total:,}** |\n")
             content.append("\n*Antigravity CLI no publica costo en dinero en sus datos locales.*\n")
             content.append("\n*Detalle por modelo en `17_antigravity_modelos_uso.md`.*\n")
+
+        # v5.3: Consumo pi (coding agent)
+        if self.pi_sessions:
+            content.append("\n---\n\n")
+            content.append("## Consumo pi (Coding Agent)\n\n")
+            pi_input = sum(s['usage']['input'] for s in self.pi_sessions)
+            pi_output = sum(s['usage']['output'] for s in self.pi_sessions)
+            pi_reason = sum(s['usage']['reasoning'] for s in self.pi_sessions)
+            pi_total = sum(s['usage']['total'] for s in self.pi_sessions)
+            pi_cost = sum(s['usage']['cost'] for s in self.pi_sessions)
+            pi_turns = sum(len(s['qa_pairs']) for s in self.pi_sessions)
+            content.append(f"| Concepto | Valor |\n|----------|------:|\n")
+            content.append(f"| Sesiones | {len(self.pi_sessions)} |\n")
+            content.append(f"| Turnos Q&A | {pi_turns} |\n")
+            content.append(f"| Input tokens | {pi_input:,} |\n")
+            content.append(f"| Output tokens | {pi_output:,} |\n")
+            content.append(f"| Reasoning tokens | {pi_reason:,} |\n")
+            content.append(f"| **Total tokens** | **{pi_total:,}** |\n")
+            content.append(f"| **Costo reportado** | **${pi_cost:.4f}** |\n")
+            content.append(f"| Costo por turno | ${(pi_cost / pi_turns) if pi_turns else 0:.4f} |\n")
+            content.append("\n*Detalle por modelo en `19_pi_modelos_uso.md`.*\n")
 
         full_content = ''.join(content)
         self._split_large_file(output_file, full_content)
@@ -4638,6 +4931,173 @@ class SessionProcessor:
         self._split_large_file(output_file, full_content)
         print(f"  Reporte modelos Antigravity generado: {output_file.name}")
 
+    # ========================================================================
+    # V5.3: REPORTES PI (coding agent)
+    # ========================================================================
+
+    def _generate_pi_report(self):
+        """Sesiones del CLI pi agrupadas por proyecto Claude, con cronologia,
+        regla de matching aplicada y Q&A completo (prompt usuario + respuesta agente)."""
+        output_file = self.output_dir / "18_pi_sesiones.md"
+
+        matched = {}
+        unmatched = []
+        for s in self.pi_sessions:
+            if s['project']:
+                matched.setdefault(s['project'], []).append(s)
+            else:
+                unmatched.append(s)
+
+        rules = {}
+        for s in self.pi_sessions:
+            if s['match_rule']:
+                rules[s['match_rule']] = rules.get(s['match_rule'], 0) + 1
+
+        content = []
+        content.append("# Sesiones de pi (Coding Agent)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append(f"- Sesiones procesadas: **{len(self.pi_sessions)}**\n")
+        content.append("- Vinculadas a un proyecto Claude: **{}** (cwd: {}, paths: {}, tiempo: {})\n".format(
+            sum(len(v) for v in matched.values()),
+            rules.get('cwd', 0), rules.get('paths', 0), rules.get('tiempo', 0)))
+        content.append(f"- Sin proyecto identificable: **{len(unmatched)}**\n\n")
+
+        def render_session(s):
+            name = s['session_id'] or s['file']
+            content.append(f"### {name}\n\n")
+            content.append(f"- **Archivo:** `{s['rel_path']}` | **Eventos:** {s['total_lines']:,}\n")
+            content.append(f"- **Periodo:** {self._format_timestamp(s['start_time'] or '')} -> "
+                           f"{self._format_timestamp(s['end_time'] or '')}"
+                           f" ({self._calculate_interaction_duration(s['start_time'] or '', s['end_time'] or '') or 'N/A'})\n")
+            content.append(f"- **CWD (pi):** `{s['cwd'] or '?'}`\n")
+            if s['project']:
+                content.append(f"- **Proyecto Claude:** `{Path(s['project']).name}` "
+                               f"(regla: `{s['match_rule']}`, prefijo: {s['match_score']})\n")
+            if s['provider']:
+                content.append(f"- **Proveedor inicial:** {s['provider']}\n")
+            if s['models_used']:
+                models = ', '.join(f"{m} ({c})" for m, c in
+                                   sorted(s['models_used'].items(), key=lambda x: -x[1]))
+                content.append(f"- **Modelos:** {models}\n")
+            u = s['usage']
+            content.append(f"- **Tokens:** {u['total']:,} (in {u['input']:,} / out {u['output']:,} / "
+                           f"reasoning {u['reasoning']:,} / cache {u['cache_read']:,}) | "
+                           f"**Costo:** ${u['cost']:.4f}\n")
+            if s['tool_calls']:
+                tools = ', '.join(f"{t} ({c})" for t, c in
+                                  sorted(s['tool_calls'].items(), key=lambda x: -x[1])[:12])
+                content.append(f"- **Tools:** {tools}\n")
+            content.append(f"- **Turnos Q&A:** {len(s['qa_pairs'])}\n\n")
+
+            for i, qa in enumerate(s['qa_pairs'], 1):
+                ts = self._format_timestamp(qa.get('ts_user') or '')
+                content.append(f"#### [{i}] Usuario ({ts}):\n\n")
+                ut = qa['user']
+                if len(ut) > 8000:
+                    content.append(ut[:8000] + f"\n\n_[... {len(ut):,} caracteres totales ...]_\n\n")
+                else:
+                    content.append(ut + "\n\n")
+                at = qa['assistant']
+                if at:
+                    content.append("**Agente:**\n\n")
+                    if len(at) > 12000:
+                        content.append(at[:12000] + f"\n\n_[... {len(at):,} caracteres totales ...]_\n\n")
+                    else:
+                        content.append(at + "\n\n")
+                else:
+                    content.append("**Agente:** _(sin respuesta de texto; solo operaciones)_\n\n")
+
+        for proj in sorted(matched, key=lambda p: -len(matched[p])):
+            sess = sorted(matched[proj], key=lambda s: s['start_time'] or '')
+            tot_tokens = sum(s['usage']['total'] for s in sess)
+            tot_cost = sum(s['usage']['cost'] for s in sess)
+            content.append("---\n\n")
+            content.append(f"## Proyecto: `{Path(proj).name}`\n\n")
+            content.append(f"- **Ruta Claude:** `{proj}`\n")
+            content.append(f"- **Sesiones pi:** {len(sess)} | "
+                           f"**Total tokens:** {tot_tokens:,} | **Total costo:** ${tot_cost:.4f}\n\n")
+            content.append("**Cronología:** " + '; '.join(
+                f"{(s['start_time'] or '')[:10]} {s['session_id'][:8]}" for s in sess) + "\n\n")
+            for s in sess:
+                render_session(s)
+
+        if unmatched:
+            content.append("---\n\n")
+            content.append("## Sin proyecto identificable\n\n")
+            content.append("*Sesiones cuyo cwd del header no coincide con ningún proyecto "
+                           "Claude analizado (lanza `pi` desde la raiz u otra ruta).*\n\n")
+            for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
+                render_session(s)
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte sesiones pi generado: {output_file.name}")
+
+    def _generate_pi_models_report(self):
+        """Estadisticas por modelo en sesiones pi: pi puede cambiar de modelo a mitad
+        de sesion, asi que el usage se acumula por modelo de cada mensaje assistant."""
+        output_file = self.output_dir / "19_pi_modelos_uso.md"
+
+        agg = {}
+        for s in self.pi_sessions:
+            for model, mu in s['model_usage'].items():
+                a = agg.setdefault(model, {
+                    'input': 0, 'output': 0, 'reasoning': 0, 'total': 0, 'cost': 0.0,
+                    'requests': 0, 'sessions': set(), 'turns': 0, 'answered_turns': 0})
+                a['input'] += mu['input']
+                a['output'] += mu['output']
+                a['reasoning'] += mu['reasoning']
+                a['total'] += mu['total']
+                a['cost'] += mu['cost']
+                a['requests'] += mu['requests']
+                a['sessions'].add(s['file'])
+            qas = s['qa_pairs']
+            dominant = max(s['model_usage'], key=lambda m: s['model_usage'][m]['requests']) \
+                if s['model_usage'] else ''
+            if dominant and dominant in agg:
+                agg[dominant]['turns'] += len(qas)
+                agg[dominant]['answered_turns'] += sum(1 for q in qas if q['assistant'])
+
+        content = []
+        content.append("# Uso de Modelos en pi (Coding Agent)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append("*pi permite cambiar de modelo durante una sesion: el consumo se "
+                       "acumula por modelo segun el campo `model` de cada mensaje assistant.*\n\n")
+
+        content.append("| Modelo | Sesiones | Requests | Tokens totales | Output | Reasoning | Costo (USD) | $/turno | T. con respuesta |\n")
+        content.append("|--------|---------:|---------:|--------------:|-------:|----------:|------------:|--------:|----------------:|\n")
+        for model, a in sorted(agg.items(), key=lambda x: -x[1]['cost']):
+            cost_per_turn = a['cost'] / a['turns'] if a['turns'] else 0
+            ans_rate = (a['answered_turns'] / a['turns'] * 100) if a['turns'] else None
+            ans_str = f"{ans_rate:.0f}%" if ans_rate is not None else "—"
+            content.append(
+                f"| {model} | {len(a['sessions'])} | {a['requests']:,} | {a['total']:,} "
+                f"| {a['output']:,} | {a['reasoning']:,} | ${a['cost']:.4f} "
+                f"| ${cost_per_turn:.4f} | {ans_str} |\n")
+
+        if agg:
+            tot = {k: sum(a[k] for a in agg.values())
+                   for k in ('input', 'output', 'reasoning', 'total')}
+            tot['cost'] = sum(a['cost'] for a in agg.values())
+            content.append(f"\n**Total pi:** {tot['total']:,} tokens | costo ${tot['cost']:.4f} | "
+                           f"{sum(a['requests'] for a in agg.values()):,} requests API\n\n")
+
+            content.append("---\n\n## Desglose por sesión\n\n")
+            content.append("| Sesión | Proyecto | CWD | Modelo(s) principal(es) | Turnos | Tokens | Costo |\n")
+            content.append("|--------|----------|-----|-------------------------|-------:|-------:|------:|\n")
+            for s in sorted(self.pi_sessions, key=lambda s: s['start_time'] or ''):
+                top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['cost'])[:2]
+                models_str = ', '.join(m for m, _ in top_models) or '—'
+                proj = Path(s['project']).name if s['project'] else '—'
+                ws = (s['cwd'] or '—')[:48].replace('|', '/')
+                content.append(
+                    f"| `{s['session_id'][:12]}...` | {proj} | `{ws}` | {models_str} "
+                    f"| {len(s['qa_pairs'])} | {s['usage']['total']:,} | ${s['usage']['cost']:.4f} |\n")
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte modelos pi generado: {output_file.name}")
+
     def _split_large_file(self, file_path: Path, content: str, max_size_mb: int = 2):
         """Divide archivos grandes en múltiples partes si superan el tamaño maximo"""
         max_size_bytes = max_size_mb * 1024 * 1024
@@ -4714,7 +5174,7 @@ class SessionProcessor:
     # ENTRADA PRINCIPAL
     # ========================================================================
 
-    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None, opencode_dir=None, antigravity_dir=None):
+    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None, opencode_dir=None, antigravity_dir=None, pi_dir=None):
         """Procesa todos los archivos JSONL en el directorio o el archivo indicado"""
         if self.input_file:
             jsonl_files = [self.input_file]
@@ -4768,9 +5228,15 @@ class SessionProcessor:
                 print(f"\nCargando sesiones de Antigravity CLI desde {antigravity_dir}...")
                 self._load_antigravity_sessions(antigravity_dir)
 
+            # v5.3: Cargar sesiones de pi (coding agent)
+            if pi_dir:
+                self.pi_dir = pi_dir
+                print(f"\nCargando sesiones de pi desde {pi_dir}...")
+                self._load_pi_sessions(pi_dir)
+
             if (self.subagent_data or self.memory_data or self.codex_matched
                     or self.qwen_sessions or self.pencil_sessions or self.opencode_sessions
-                    or self.antigravity_sessions):
+                    or self.antigravity_sessions or self.pi_sessions):
                 self.generate_reports()
             else:
                 print("No se encontraron datos para procesar.")
@@ -4834,6 +5300,12 @@ class SessionProcessor:
             print(f"\nCargando sesiones de Antigravity CLI desde {antigravity_dir}...")
             self._load_antigravity_sessions(antigravity_dir)
 
+        # v5.3: Cargar sesiones de pi (coding agent)
+        if pi_dir:
+            self.pi_dir = pi_dir
+            print(f"\nCargando sesiones de pi desde {pi_dir}...")
+            self._load_pi_sessions(pi_dir)
+
         # Generar reportes
         self.generate_reports()
 
@@ -4847,7 +5319,7 @@ class SessionProcessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Procesar sesiones de Claude Code v5.2 (subagentes, memoria, integración Codex + Qwen + Pencil + OpenCode + Antigravity CLI)',
+        description='Procesar sesiones de Claude Code v5.3 (subagentes, memoria, integración Codex + Qwen + Pencil + OpenCode + Antigravity CLI + pi)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
@@ -4859,13 +5331,14 @@ Ejemplos:
   python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
   python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode/
   python3 process_sessions.py . -o reportes --antigravity-dir ~/.gemini/antigravity-cli/
+  python3 process_sessions.py . -o reportes --pi-dir ~/.pi/agent/sessions/
   python3 process_sessions.py . --file-history CLAUDE.md
   python3 process_sessions.py . --no-subagents
         """
     )
     parser.add_argument('input_dir', nargs='?', default='.',
                         help='Directorio con archivos .jsonl o archivo individual (por defecto: \'.\')')
-    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.2.0')
+    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.3.0')
     parser.add_argument('-o', '--output', help='Directorio de salida para reportes')
     parser.add_argument('--last', type=int, help='Extraer las últimas N conversaciones en un archivo separado')
     parser.add_argument('--file-history', help='Generar historial completo de modificaciones para un archivo especifico')
@@ -4881,6 +5354,8 @@ Ejemplos:
                         help='Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas')
     parser.add_argument('--antigravity-dir',
                         help='Directorio de Antigravity CLI (~/.gemini/antigravity-cli/) para integrar sus conversaciones')
+    parser.add_argument('--pi-dir',
+                        help='Directorio de pi (~/.pi/agent/sessions/) para integrar sus sesiones de coding agent')
 
     args = parser.parse_args()
 
@@ -4890,7 +5365,7 @@ Ejemplos:
         sys.exit(1)
 
     processor = SessionProcessor(args.input_dir, args.output)
-    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir, args.opencode_dir, args.antigravity_dir)
+    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir, args.opencode_dir, args.antigravity_dir, args.pi_dir)
 
 
 if __name__ == "__main__":

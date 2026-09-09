@@ -1,7 +1,7 @@
-# Cómo agregar una nueva herramienta de agentes (checklist v5.2)
+# Cómo agregar una nueva herramienta de agentes (checklist v5.3)
 
 Guía de integración probada con **Codex (v4.0)**, **Qwen (v4.1)**, **Pencil (v5.0)**,
-**OpenCode (v5.1)** y **Antigravity CLI (v5.2)**.
+**OpenCode (v5.1)**, **Antigravity CLI (v5.2)** y **pi coding agent (v5.3)**.
 Cada herramienta nueva sigue los mismos 6 pasos de código + documentación + tests.
 Tiempo típico: 1 sesión de trabajo.
 
@@ -103,12 +103,12 @@ gh run watch <id> --exit-status   # verde en la matriz antes de dar por hecho
 
 | Pieza | Buscar |
 |-------|--------|
-| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions`, `_load_opencode_sessions`, `_load_antigravity_sessions` |
-| Parser | `_parse_pencil_session` (streaming), `_query_opencode_*` (SQLite: `json_extract` + `substr` server-side, jamás `SELECT data` crudo), `_parse_antigravity_conversation` (SQLite+protobuf: `_pb_fields` decodifica fila por fila, tool-results se descartan) |
-| Matching | `_best_project_match`, `_match_pencil_project`, `_match_opencode_project`, `_match_antigravity_project`, `_collect_claude_project_cwds` |
-| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report`, `_generate_opencode_report`, `_generate_opencode_models_report`, `_generate_antigravity_report`, `_generate_antigravity_models_report` |
+| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions`, `_load_opencode_sessions`, `_load_antigravity_sessions`, `_load_pi_sessions` |
+| Parser | `_parse_pencil_session` (streaming), `_parse_pi_session` (streaming + cap de textos + usage por modelo), `_query_opencode_*` (SQLite: `json_extract` + `substr` server-side, jamás `SELECT data` crudo), `_parse_antigravity_conversation` (SQLite+protobuf: `_pb_fields` decodifica fila por fila, tool-results se descartan) |
+| Matching | `_best_project_match`, `_match_pencil_project`, `_match_opencode_project`, `_match_antigravity_project`, `_match_pi_project`, `_collect_claude_project_cwds` |
+| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report`, `_generate_opencode_report`, `_generate_opencode_models_report`, `_generate_antigravity_report`, `_generate_antigravity_models_report`, `_generate_pi_report`, `_generate_pi_models_report` (18_/19_) |
 | Split seguro | `_split_large_file` |
-| CLI | `main()` → `--pencil-dir` / `--opencode-dir` / `--antigravity-dir` como plantilla de flag |
+| CLI | `main()` → `--pencil-dir` / `--opencode-dir` / `--antigravity-dir` / `--pi-dir` como plantilla de flag |
 
 ### Si la fuente es SQLite (OpenCode, Antigravity y futuros)
 - Abrir **read-only**: `sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)`; degradar con WARN si no se puede.
