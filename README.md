@@ -3,12 +3,13 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Dependencies: Stdlib Only](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-brightgreen.svg)](requirements.txt)
+[![CI](https://github.com/fmicalizzi/AI-Session-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fmicalizzi/AI-Session-Analyzer/actions/workflows/ci.yml)
 
 Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**, **Antigravity CLI**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
 
 ## Descripcion
 
-Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen, sesiones de diseño de Pencil (pen.dev) y sesiones de OpenCode CLI y conversaciones de Antigravity CLI (Google) sobre los mismos proyectos. Genera reportes detallados que incluyen:
+Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4) y la actividad **paralela** que otros agentes realizaron sobre los mismos proyectos: Qwen CLI, Pencil (pen.dev), OpenCode CLI y Antigravity CLI (Google). Las sesiones de estos ultimos se **adjudican automaticamente** al proyecto Claude correspondiente (3 reglas auditables: cwd → paths → tiempo). Genera reportes detallados que incluyen:
 - Historico de mensajes del usuario
 - Respuestas del sistema
 - Pares de preguntas y respuestas
@@ -115,6 +116,13 @@ python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode
 ```bash
 # Incluir conversaciones de Antigravity CLI (Google, agy), adjudicadas al proyecto Claude
 python3 process_sessions.py . -o reportes --antigravity-dir ~/.gemini/antigravity-cli/
+```
+
+### Combinado completo (todos los agentes)
+```bash
+python3 process_sessions.py . -o reportes \
+  --codex-dir ~/.codex/ --qwen-dir ~/.qwen/ --pencil-dir ~/.pencil/ \
+  --opencode-dir ~/.local/share/opencode/ --antigravity-dir ~/.gemini/antigravity-cli/
 ```
 
 ### Ver todas las opciones
@@ -232,6 +240,8 @@ Ver `ANTIGRAVITY_DATA_GUIDE.md` para el detalle.
 
 ### 1. Resumen de Sesiones (`00_resumen_sesiones.md`)
 - Estadisticas generales (mensajes, operaciones, Q&A)
+- v4.x: Estadisticas de Codex y Qwen
+- v5.x: Bloque "Agentes externos" — sesiones/turnos/tokens/costo de Pencil, OpenCode y Antigravity con cuantas quedaron adjudicadas a un proyecto Claude
 - v3.1: Tokens por sesion (input, output, cache creation, cache read)
 - v3.1: Modelo principal por sesion
 - v3.0: Conteo de subagentes por sesion
@@ -308,6 +318,7 @@ Reporte completo de consumo y eficiencia por sesion:
 - **Detalle por sesion:** Desglose de tokens, modelos usados, output ratio, cache efficiency
 - **Ranking de eficiencia:** Sesiones ordenadas por tokens/Q&A (menor = mas eficiente)
 - **Uso de modelos global:** Que modelos se usaron, cuantas veces, tipo (principal/subagent/compaction)
+- **v5.x:** Secciones "Consumo Pencil", "Consumo OpenCode" y "Consumo Antigravity" (tokens/costo por agente; Antigravity solo tokens, su fuente no publica USD)
 
 Ideal para:
 - Evaluar que sesiones fueron mas costosas y por que
@@ -751,10 +762,19 @@ python3 -m unittest discover tests
 pytest
 ```
 
+La suite cubre el nucleo (Q&A, duraciones, split de archivos) y cada integracion con su propia clase
+(`TestPencilIntegration`, `TestOpenCodeIntegration`, `TestAntigravityIntegration`): parseo con fixtures
+sinteticos (JSONL, SQLite `session→message→part` y SQLite+protobuf segun el caso), las 3 reglas de
+adjudicacion (cwd/paths/tiempo), los reportes generados y la degradacion silenciosa ante fuentes faltantes.
+
+CI (GitHub Actions) corre la suite en la matriz **Python 3.8 → 3.13 x ubuntu/macos**: el codigo debe
+mantenerse compatible con 3.8 (sin walrus, `match` ni genericos `list[...]`/`dict[...]` en anotaciones).
+El procedimiento para sumar un agente nuevo esta documentado en `HOW_TO_ADD_A_PROVIDER.md`.
+
 ## Desarrollado para
 
 Desarrolladores, Project Managers y equipos que:
-- Trabajan con multiples agentes de IA (Claude, Codex, Qwen) en los mismos proyectos
+- Trabajan con multiples agentes de IA (Claude, Codex, Qwen, Pencil, OpenCode, Antigravity CLI) en los mismos proyectos
 - Necesitan documentar procesos de desarrollo asistidos por IA
 - Quieren visibilidad completa de lo que hizo cada agente
 - Buscan generar reportes tecnicos automaticos
@@ -767,3 +787,5 @@ Desarrolladores, Project Managers y equipos que:
 **Pro Tip v4.0**: Con `--codex-dir ~/.codex/`, el reporte `10_codex_integrado.md` muestra TODO lo que hizo Codex: los 35+ comandos que ejecuto, su razonamiento, y la respuesta completa — no solo el resumen de 5KB que Claude recibio de vuelta.
 
 **Pro Tip v4.1**: Con `--qwen-dir ~/.qwen/`, el reporte `11_qwen_paralelo.md` muestra la actividad de Qwen en el mismo proyecto, con correlacion temporal para ver que dias ambos agentes estaban trabajando en paralelo.
+
+**Pro Tip v5.x**: Pasando `--pencil-dir`/`--opencode-dir`/`--antigravity-dir` a la vez, los reportes `12_` a `17_` agrupan cada sesion externa **bajo su proyecto Claude** y muestran la regla de adjudicacion usada (`cwd`/`paths`/`tiempo`). Si una sesion cae en "Sin proyecto identificable", la regla `tiempo` habra fallado por ambiguedad: revisa su workspace y sus rutas reales antes de desconfiar del matching.

@@ -676,6 +676,14 @@ class TestAntigravityIntegration(unittest.TestCase):
         sp._load_antigravity_sessions(str(Path(self.temp_dir) / "inexistente"))
         self.assertEqual(sp.antigravity_sessions, [])
 
+    def test_summary_report_includes_external_agents(self):
+        sp = self._load()
+        sp._generate_sessions_summary()
+        r00 = (self.output_dir / "00_resumen_sesiones.md").read_text(encoding="utf-8")
+        self.assertIn("Agentes externos", r00)
+        self.assertIn("Antigravity CLI", r00)
+        self.assertIn("proyecto Claude: 3", r00)
+
 
 if __name__ == "__main__":
     unittest.main()

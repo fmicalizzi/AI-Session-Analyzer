@@ -2520,6 +2520,26 @@ class SessionProcessor:
             content.append(f"- **Mensajes Qwen:** {total_qwen_msgs}\n")
             content.append(f"- **Comandos Qwen:** {total_qwen_tools}\n")
 
+        # v5.x: agentes externos con adjudicacion al proyecto (Pencil/OpenCode/Antigravity)
+        if self.pencil_sessions or self.opencode_sessions or self.antigravity_sessions:
+            content.append("\n### Agentes externos (v5.x)\n\n")
+            for name, sess in (('Pencil', self.pencil_sessions),
+                               ('OpenCode', self.opencode_sessions),
+                               ('Antigravity CLI', self.antigravity_sessions)):
+                if not sess:
+                    continue
+                n_matched = sum(1 for x in sess if x['project'])
+                tokens = sum(x['usage']['total'] for x in sess)
+                turns = sum(len(x['qa_pairs']) for x in sess
+                            if not x.get('subagent'))
+                cost = sum(x['usage'].get('cost', 0.0) for x in sess)
+                line = (f"- **{name}:** {len(sess)} sesiones "
+                        f"(proyecto Claude: {n_matched}) | turnos Q&A: {turns} "
+                        f"| tokens: {tokens:,}")
+                if cost:
+                    line += f" | costo: ${cost:.4f}"
+                content.append(line + "\n")
+
         content.append("\n")
 
         content.append("## Archivos Procesados\n\n")
