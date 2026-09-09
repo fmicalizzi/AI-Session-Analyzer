@@ -469,6 +469,214 @@ class TestOpenCodeIntegration(unittest.TestCase):
         self.assertEqual(sp.opencode_sessions, [])
 
 
+class TestAntigravityIntegration(unittest.TestCase):
+    """Fixture: ~/.gemini/antigravity-cli/conversations/*.db sinteticos con
+    payloads protobuf wire-format reales (steps / gen_metadata / tmb)."""
+
+    @staticmethod
+    def _v(n):
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    @classmethod
+    def _tag(cls, fn, wt):
+        return cls._v((fn << 3) | wt)
+
+    @classmethod
+    def _tf(cls, fn, data):
+        return cls._tag(fn, 2) + cls._v(len(data)) + data
+
+    @classmethod
+    def _vf(cls, fn, v):
+        return cls._tag(fn, 0) + cls._v(v)
+
+    def _env(self, sec, usage=None):
+        e = self._tf(1, self._vf(1, sec) + self._vf(2, 500000000))
+        if usage:
+            e += self._tf(9, usage)
+        return e
+
+    def _user_step(self, sec, text, workspace=None):
+        payload = self._tf(2, text.encode('utf-8'))
+        if workspace:
+            payload += self._tf(12, self._tf(12, workspace.encode('utf-8')))
+        return (self._vf(1, 14) + self._vf(4, 3) + self._tf(5, self._env(sec))
+                + self._tf(19, payload))
+
+    def _agent_step(self, sec, answer=None, calls=None, usage=None):
+        payload = b''
+        if answer:
+            payload += self._tf(1, answer.encode('utf-8'))
+        for name, args in (calls or []):
+            payload += self._tf(7, self._vf(1, 0) + self._tf(2, name.encode())
+                                + self._tf(3, args.encode('utf-8')))
+        return (self._vf(1, 15) + self._vf(4, 3) + self._tf(5, self._env(sec, usage))
+                + self._tf(20, payload))
+
+    def _tool_result_step(self, sec, tool='write_file', output='X' * 4096):
+        return (self._vf(1, 132) + self._vf(4, 3) + self._tf(5, self._env(sec))
+                + self._tf(140, self._tf(2, output.encode('utf-8'))))
+
+    def _gen(self, model, out, ctx, reas):
+        usage = self._vf(3, out) + self._vf(5, ctx) + self._vf(9, reas)
+        return self._tf(1, self._tf(19, model.encode('utf-8')) + self._tf(4, usage))
+
+    def _make_db(self, path, tmb_uri=None, steps=None, gens=None):
+        import sqlite3
+        con = sqlite3.connect(str(path))
+        con.executescript("""
+            CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer,
+                status integer, step_payload blob);
+            CREATE TABLE gen_metadata (idx integer PRIMARY KEY, data blob);
+            CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob);
+        """)
+        if tmb_uri:
+            con.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)",
+                        (self._tf(1, self._tf(1, tmb_uri.encode('utf-8'))),))
+        for i, (stype, payload) in enumerate(steps or []):
+            con.execute("INSERT INTO steps VALUES (?,?,?,?)", (i, stype, 3, payload))
+        for i, g in enumerate(gens or []):
+            con.execute("INSERT INTO gen_metadata VALUES (?,?)", (i, g))
+        con.commit()
+        con.close()
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.input_dir = Path(self.temp_dir) / "sessions"
+        self.output_dir = Path(self.temp_dir) / "reports"
+        self.input_dir.mkdir(parents=True)
+        self.agy_dir = Path(self.temp_dir) / ".gemini/antigravity-cli"
+        self.conv_dir = self.agy_dir / "conversations"
+        self.conv_dir.mkdir(parents=True)
+        (self.agy_dir / "cache").mkdir(parents=True)
+
+        from datetime import datetime, timezone
+        def sec(h, m, s=0):
+            return int(datetime(2026, 9, 8, h, m, s, tzinfo=timezone.utc).timestamp())
+
+        # convA: workspace real del proyecto (regla cwd) + Q&A + tools + usage
+        self._make_db(
+            self.conv_dir / "convA.db",
+            tmb_uri="file:///Users/tester/dev/proj-app",
+            steps=[
+                (14, self._user_step(sec(10, 0), "rediseña el hero")),
+                (15, self._agent_step(sec(10, 1), calls=[
+                    ("write_file", '{"AbsolutePath":"/Users/tester/dev/proj-app/src/Hero.tsx","Content":"x"}')])),
+                (132, self._tool_result_step(sec(10, 1))),
+                (15, self._agent_step(sec(10, 2), answer="Listo, hero nuevo.")),
+            ],
+            gens=[self._gen("gemini-3.8-flash", 800, 20000, 100),
+                  self._gen("gemini-3.8-flash", 50, 20500, 0)])
+
+        # convB: workspace fuera de todo proyecto, pero tool calls apuntan al proyecto
+        self._make_db(
+            self.conv_dir / "convB.db",
+            tmb_uri="file:///Users/tester/.agy-cache/scratch-1",
+            steps=[
+                (14, self._user_step(sec(11, 0), "arregla el bug")),
+                (15, self._agent_step(sec(11, 1), answer="Parche aplicado.", calls=[
+                    ("view_file", '{"AbsolutePath":"/Users/tester/dev/proj-app/docs/bug.md"}')])),
+            ],
+            gens=[self._gen("gemini-3.8-flash", 30, 9000, 5)])
+
+        # convC: sin workspace ni paths utiles -> solo tiempo
+        self._make_db(
+            self.conv_dir / "convC.db",
+            steps=[
+                (14, self._user_step(sec(10, 59), "hola")),
+                (15, self._agent_step(sec(11, 1), answer="hi")),
+            ])
+
+        # convD: base vacia (sin steps) -> se degrada, no rompe
+        self._make_db(self.conv_dir / "convD.db")
+
+        with open(self.agy_dir / "cache" / "conversation_metadata.json", 'w') as f:
+            json.dump({"conversations": {
+                "convA": {"summary": {"ID": "convA", "Preview": "Rediseño de Hero"}}}},
+                f)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _load(self):
+        sp = SessionProcessor(str(self.input_dir), str(self.output_dir))
+        sp.user_messages.append({"cwd": "/Users/tester/dev/proj-app",
+                                 "timestamp": "2026-09-08T10:00:00.000Z"})
+        sp.assistant_responses.append({"cwd": "/Users/tester/dev/proj-app",
+                                       "timestamp": "2026-09-08T11:00:30.000Z"})
+        sp._load_antigravity_sessions(str(self.agy_dir))
+        return sp
+
+    def test_parse_by_cwd_and_usage(self):
+        by_id = {s['session_id']: s for s in self._load().antigravity_sessions}
+        a = by_id['convA']
+        self.assertEqual(a['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(a['match_rule'], 'cwd')
+        self.assertEqual(a['cwd'], '/Users/tester/dev/proj-app')
+        self.assertEqual(a['title'], 'Rediseño de Hero')
+        self.assertEqual(a['usage']['input'], 40500)
+        self.assertEqual(a['usage']['output'], 850)
+        self.assertEqual(a['usage']['reasoning'], 100)
+        self.assertEqual(a['usage']['total'], 41350)
+        self.assertEqual(a['models_used'], {'gemini-3.8-flash': 2})
+        self.assertEqual(a['model_usage']['gemini-3.8-flash']['requests'], 2)
+        self.assertEqual(len(a['qa_pairs']), 1)
+        self.assertEqual(a['qa_pairs'][0]['user'], 'rediseña el hero')
+        self.assertEqual(a['qa_pairs'][0]['assistant'], 'Listo, hero nuevo.')
+        self.assertEqual(a['tool_calls'], {'write_file': 1})
+        self.assertIn('/Users/tester/dev/proj-app/src/Hero.tsx', a['external_paths'])
+
+    def test_match_rule_paths_fallback(self):
+        by_id = {s['session_id']: s for s in self._load().antigravity_sessions}
+        b = by_id['convB']
+        self.assertEqual(b['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(b['match_rule'], 'paths')
+
+    def test_match_rule_tiempo_fallback(self):
+        by_id = {s['session_id']: s for s in self._load().antigravity_sessions}
+        c = by_id['convC']
+        self.assertEqual(c['project'], '/Users/tester/dev/proj-app')
+        self.assertEqual(c['match_rule'], 'tiempo')
+
+    def test_empty_db_skipped(self):
+        ids = {s['session_id'] for s in self._load().antigravity_sessions}
+        self.assertNotIn('convD', ids)
+
+    def test_title_falls_back_to_first_prompt(self):
+        by_id = {s['session_id']: s for s in self._load().antigravity_sessions}
+        self.assertEqual(by_id['convC']['title'], 'hola')
+
+    def test_antigravity_reports_generated(self):
+        sp = self._load()
+        sp._generate_antigravity_report()
+        sp._generate_antigravity_models_report()
+        r16 = self.output_dir / "16_antigravity_sesiones.md"
+        r17 = self.output_dir / "17_antigravity_modelos_uso.md"
+        self.assertTrue(r16.exists())
+        self.assertTrue(r17.exists())
+        c16 = r16.read_text(encoding="utf-8")
+        self.assertIn("rediseña el hero", c16)
+        self.assertIn("Listo, hero nuevo.", c16)
+        self.assertIn("regla: `cwd`", c16)
+        self.assertIn("regla: `paths`", c16)
+        self.assertIn("regla: `tiempo`", c16)
+        c17 = c17 = r17.read_text(encoding="utf-8")
+        self.assertIn("gemini-3.8-flash", c17)
+        self.assertIn("`write_file`", c17)
+
+    def test_missing_dir_degrades_quietly(self):
+        sp = SessionProcessor(str(self.input_dir), str(self.output_dir))
+        sp._load_antigravity_sessions(str(Path(self.temp_dir) / "inexistente"))
+        self.assertEqual(sp.antigravity_sessions, [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

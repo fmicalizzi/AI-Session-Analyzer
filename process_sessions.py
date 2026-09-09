@@ -4,6 +4,7 @@ Script para procesar archivos JSONL de sesiones de Claude y extraer información
 Genera reportes organizados de mensajes, respuestas, operaciones de archivos,
 actividad de subagentes y memoria del proyecto.
 
+v5.2 - Integración con Antigravity CLI (Google): conversaciones SQLite+protobuf adjudicadas al proyecto Claude.
 v5.1 - Integración con OpenCode CLI: sesiones paralelas desde opencode.db adjudicadas al proyecto Claude.
 v5.0 - Integración con Pencil (pen.dev): sesiones de diseño adjudicadas al proyecto Claude.
 v4.1 - Integración con Qwen CLI para visibilidad de actividad paralela.
@@ -82,6 +83,11 @@ class SessionProcessor:
         self.opencode_dir = None
         self.opencode_sessions = []      # Sesiones parseadas desde opencode.db (SQLite)
         self.opencode_projects = []      # CWDs detectados en sesiones Claude (para matching)
+
+        # v5.2: Antigravity CLI integration
+        self.antigravity_dir = None
+        self.antigravity_sessions = []   # Conversaciones parseadas de conversations/*.db
+        self.antigravity_projects = []   # CWDs detectados en sesiones Claude (para matching)
 
     # ========================================================================
     # PROCESAMIENTO PRINCIPAL - Sesiones principales
@@ -2050,6 +2056,367 @@ class SessionProcessor:
               f"(con proyecto Claude: {matched}, sin proyecto: {len(self.opencode_sessions) - matched}, "
               f"sub-agentes: {subs})")
 
+    # ========================================================================
+    # V5.2: INTEGRACION ANTIGRAVITY CLI (Google) - conversations/*.db (SQLite+protobuf)
+    # ========================================================================
+
+    AGY_ARG_CAP = 2000       # chars del JSON de arguments de un tool call
+    AGY_TEXT_CAP_USER = 8000
+    AGY_TEXT_CAP_ANSWER = 12000
+
+    @staticmethod
+    def _pb_varint(b: bytes, i: int) -> Tuple[int, int]:
+        """Lee un varint protobuf en b[i:] -> (valor, nueva_posicion)."""
+        r = 0
+        s = 0
+        n = len(b)
+        while i < n:
+            x = b[i]
+            i += 1
+            r |= (x & 0x7F) << s
+            if not x & 0x80:
+                return r, i
+            s += 7
+            if s > 63:
+                raise ValueError('varint demasiado largo')
+        raise ValueError('varint truncado')
+
+    @classmethod
+    def _pb_fields(cls, b: bytes) -> List[Tuple[int, int, Any]]:
+        """Decodificador wire-format generico (sin schema): [(field_no, wire_type, value)].
+        value: int (wt 0/1/5), bytes (wt 2). Se detiene ante datos ilegibles."""
+        out = []
+        i = 0
+        n = len(b)
+        while i < n:
+            try:
+                key, i = cls._pb_varint(b, i)
+            except ValueError:
+                break
+            fn, wt = key >> 3, key & 7
+            if fn == 0:
+                break
+            if wt == 0:
+                try:
+                    v, i = cls._pb_varint(b, i)
+                except ValueError:
+                    break
+                out.append((fn, 0, v))
+            elif wt == 2:
+                try:
+                    ln, i = cls._pb_varint(b, i)
+                except ValueError:
+                    break
+                if ln < 0 or i + ln > n:
+                    break
+                out.append((fn, 2, b[i:i + ln]))
+                i += ln
+            elif wt == 5 and i + 4 <= n:
+                out.append((fn, 5, b[i:i + 4]))
+                i += 4
+            elif wt == 1 and i + 8 <= n:
+                out.append((fn, 1, b[i:i + 8]))
+                i += 8
+            else:
+                break
+        return out
+
+    @classmethod
+    def _pb_get(cls, fields: list, fn: int):
+        """Primer valor del numero de campo pedido (o None)."""
+        for f, _wt, v in fields:
+            if f == fn:
+                return v
+        return None
+
+    @staticmethod
+    def _pb_text(v) -> str:
+        if isinstance(v, (bytes, bytearray)):
+            try:
+                return v.decode('utf-8', 'replace')
+            except Exception:
+                return ''
+        return ''
+
+    @staticmethod
+    def _agy_iso(sec, nanos: int = 0) -> Optional[str]:
+        """epoch segundos+nanos protobuf -> ISO-8601 UTC (reusa el conversor de OpenCode)."""
+        if not sec:
+            return None
+        try:
+            return SessionProcessor._opencode_iso(int(sec) * 1000 + int(nanos or 0) // 1000000)
+        except Exception:
+            return None
+
+    def _agy_usage_from(self, blob) -> Dict[str, int]:
+        """Uso de una generacion LLM: f3 salida, f5 contexto/entrada, f9 razonamiento."""
+        u = {'output': 0, 'input': 0, 'reasoning': 0}
+        if not isinstance(blob, bytes):
+            return u
+        for fn, wt, v in self._pb_fields(blob):
+            if wt != 0:
+                continue
+            if fn == 3:
+                u['output'] = v
+            elif fn == 5:
+                u['input'] = v
+            elif fn == 9:
+                u['reasoning'] = v
+        return u
+
+    def _parse_antigravity_conversation(self, db_path: Path,
+                                        cache_info: Optional[Dict] = None) -> Optional[Dict]:
+        """Parsea una conversacion Antigravity (un .db = una sesion).
+        Streaming: fila por fila de `steps`, payload protobuf decodiado por paso y
+        descartado salvo lo necesario. Los tool-results (type 132) nunca se retienen."""
+        try:
+            con = sqlite3.connect(db_path.as_uri() + '?mode=ro&immutable=1', uri=True)
+        except sqlite3.Error:
+            return None
+
+        session_id = db_path.stem
+        cwd = ''
+        try:
+            row = con.execute(
+                "SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()
+            if row and row[0]:
+                for fn, wt, v in self._pb_fields(row[0]):
+                    if fn == 1 and wt == 2:
+                        inner = self._pb_get(self._pb_fields(v), 1)
+                        t = self._pb_text(inner)
+                        if t.startswith('file://'):
+                            cwd = t[len('file://'):]
+                            break
+        except sqlite3.Error:
+            pass
+
+        s = {
+            'session_id': session_id,
+            'file': db_path.name,
+            'title': '',
+            'cwd': cwd,
+            'start_time': None,
+            'end_time': None,
+            'steps': 0,
+            'models_used': {},
+            'model_usage': {},
+            'qa_pairs': [],
+            'tool_calls': {},
+            'external_paths': set(),
+            'usage': {'input': 0, 'output': 0, 'reasoning': 0, 'total': 0, 'cost': 0.0},
+            'project': None,
+            'match_rule': None,
+            'match_score': 0,
+        }
+
+        pending_user = None   # (text, ts)
+        buf = []
+        buf_ts = None
+
+        def flush_turn():
+            if pending_user is not None:
+                s['qa_pairs'].append({
+                    'user': pending_user[0], 'assistant': '\n\n'.join(buf),
+                    'ts_user': pending_user[1], 'ts_assistant': buf_ts})
+
+        try:
+            cur = con.execute(
+                "SELECT idx, step_type, step_payload FROM steps ORDER BY idx")
+            for _idx, stype, payload in cur:
+                if not payload:
+                    continue
+                s['steps'] += 1
+                top = self._pb_fields(payload)
+                env = self._pb_get(top, 5)
+                ts = None
+                if isinstance(env, bytes):
+                    tsmsg = self._pb_get(self._pb_fields(env), 1)
+                    if isinstance(tsmsg, bytes):
+                        tf = self._pb_fields(tsmsg)
+                        ts = self._agy_iso(self._pb_get(tf, 1), self._pb_get(tf, 2) or 0)
+                if ts:
+                    if not s['start_time'] or ts < s['start_time']:
+                        s['start_time'] = ts
+                    if not s['end_time'] or ts > s['end_time']:
+                        s['end_time'] = ts
+
+                if stype == 14:
+                    data = self._pb_get(top, 19)
+                    if not isinstance(data, bytes):
+                        continue
+                    fl = self._pb_fields(data)
+                    text = self._pb_text(self._pb_get(fl, 2)).strip()
+                    ctx = self._pb_get(fl, 12)
+                    if isinstance(ctx, bytes) and not s['cwd']:
+                        uri = self._pb_text(self._pb_get(self._pb_fields(ctx), 12))
+                        if uri.startswith('file://'):
+                            s['cwd'] = uri[len('file://'):]
+                    if text:
+                        flush_turn()
+                        pending_user = (text[:self.AGY_TEXT_CAP_USER], ts)
+                        buf, buf_ts = [], None
+                        self._extract_paths_from_text(text, s['external_paths'])
+                elif stype == 15:
+                    data = self._pb_get(top, 20)
+                    if not isinstance(data, bytes):
+                        continue
+                    for fn, wt, v in self._pb_fields(data):
+                        if fn == 1 and wt == 2:
+                            t = self._pb_text(v).strip()
+                            if t:
+                                buf.append(t[:self.AGY_TEXT_CAP_ANSWER])
+                                buf_ts = buf_ts or ts
+                        elif fn == 7 and wt == 2:
+                            tc = self._pb_fields(v)
+                            name = self._pb_text(self._pb_get(tc, 2)) or '?'
+                            s['tool_calls'][name] = s['tool_calls'].get(name, 0) + 1
+                            args = self._pb_text(self._pb_get(tc, 3))[:self.AGY_ARG_CAP]
+                            if args:
+                                self._extract_paths_from_text(args, s['external_paths'])
+            flush_turn()
+
+            for _gidx, gdata in con.execute(
+                    "SELECT idx, data FROM gen_metadata ORDER BY idx"):
+                if not gdata:
+                    continue
+                rec = self._pb_get(self._pb_fields(gdata), 1)
+                if not isinstance(rec, bytes):
+                    continue
+                rf = self._pb_fields(rec)
+                model = self._pb_text(self._pb_get(rf, 19)).strip()
+                usage = self._agy_usage_from(self._pb_get(rf, 4))
+                if not model:
+                    model = 'desconocido'
+                s['models_used'][model] = s['models_used'].get(model, 0) + 1
+                mu = s['model_usage'].setdefault(model, {
+                    'input': 0, 'output': 0, 'reasoning': 0, 'total': 0, 'cost': 0.0,
+                    'requests': 0})
+                mu['input'] += usage['input']
+                mu['output'] += usage['output']
+                mu['reasoning'] += usage['reasoning']
+                mu['total'] += usage['input'] + usage['output']
+                mu['requests'] += 1
+                s['usage']['input'] += usage['input']
+                s['usage']['output'] += usage['output']
+                s['usage']['reasoning'] += usage['reasoning']
+        except sqlite3.Error:
+            if not s['steps']:
+                con.close()
+                return None
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+        if not s['steps']:
+            return None
+        s['usage']['total'] = s['usage']['input'] + s['usage']['output']
+        if not s['cwd'] and cache_info:
+            uris = cache_info.get('WorkspaceURIs') or []
+            if uris and isinstance(uris[0], str) and uris[0].startswith('file://'):
+                s['cwd'] = uris[0][len('file://'):]
+        if cache_info and cache_info.get('Preview'):
+            s['title'] = cache_info['Preview']
+        elif s['qa_pairs']:
+            s['title'] = s['qa_pairs'][0]['user'].split('\n')[0][:60]
+        return s
+
+    def _load_antigravity_cache_metadata(self, base: Path) -> Dict[str, Dict]:
+        """cache/conversation_metadata.json: {ID: {Preview, WorkspaceURIs, ...}}.
+        Archivo chico (~300 KB): json.load esta permitido (no es una fuente de sesiones)."""
+        meta_path = base / 'cache' / 'conversation_metadata.json'
+        if not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, 'r', encoding='utf-8', errors='replace') as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        out = {}
+        convs = raw.get('conversations') if isinstance(raw, dict) else None
+        if not isinstance(convs, dict):
+            return {}
+        for cid, entry in convs.items():
+            summ = entry.get('summary') if isinstance(entry, dict) else None
+            if isinstance(summ, dict):
+                out[cid] = summ
+        return out
+
+    def _match_antigravity_project(self, session: Dict[str, Any]):
+        """Adjudica proyecto Claude a una conversacion Antigravity.
+        Regla 1: workspace (cwd) con prefijo + contencion real.
+        Regla 2: votacion por rutas de tool calls / prompts.
+        Regla 3: desempate temporal con mensajes Claude."""
+        proj, score = self._best_project_match(session.get('cwd', ''),
+                                               projects=self.antigravity_projects)
+        if proj:
+            return proj, 'cwd', score
+
+        votes = {}
+        for p in session.get('external_paths', []):
+            cand, sc = self._best_project_match(p, projects=self.antigravity_projects)
+            if cand and sc > votes.get(cand, 0):
+                votes[cand] = sc
+        if votes:
+            best = max(votes, key=votes.get)
+            if list(votes.values()).count(votes[best]) == 1:
+                return best, 'paths', votes[best]
+
+        start = session.get('start_time')
+        end = session.get('end_time')
+        if start and end:
+            overlap = {}
+            for msg in self.user_messages + self.assistant_responses:
+                c = msg.get('cwd', '')
+                ts = msg.get('timestamp', '')
+                if c and ts and not (end < ts or start > ts):
+                    overlap[c] = overlap.get(c, 0) + 1
+            if overlap:
+                best_cwd = max(overlap, key=overlap.get)
+                proj, sc = self._best_project_match(best_cwd, min_common=0,
+                                                    projects=self.antigravity_projects)
+                if proj:
+                    return proj, 'tiempo', sc
+
+        return None, None, 0
+
+    def _load_antigravity_sessions(self, antigravity_dir: str):
+        """Carga conversaciones Antigravity CLI desde <dir>/conversations/*.db."""
+        base = Path(antigravity_dir).expanduser().resolve()
+        if (base / 'conversations').is_dir():
+            conv_dir = base / 'conversations'
+        elif list(base.glob('*.db')):
+            conv_dir = base
+        else:
+            conv_dir = base / 'conversations'
+        dbs = sorted(conv_dir.glob('*.db'))
+        if not dbs:
+            print(f"  WARN: no hay bases .db en {conv_dir}")
+            return
+
+        self.antigravity_projects = self._collect_claude_project_cwds()
+        cache_meta = self._load_antigravity_cache_metadata(base)
+
+        print(f"  Bases de conversacion encontradas: {len(dbs)} | proyectos Claude: "
+              f"{len(self.antigravity_projects)}")
+        for db_path in dbs:
+            cid = db_path.stem
+            s = self._parse_antigravity_conversation(db_path, cache_meta.get(cid))
+            if not s:
+                print(f"  WARN: no se pudo parsear {db_path.name} (¿formato nuevo?)")
+                continue
+            s['external_paths'] = {p for p in s['external_paths']
+                                   if len(self._path_segments(p)) >= 3}
+            proj, rule, score = self._match_antigravity_project(s)
+            s['project'], s['match_rule'], s['match_score'] = proj, rule, score
+            self.antigravity_sessions.append(s)
+
+        matched = sum(1 for s in self.antigravity_sessions if s['project'])
+        print(f"  Sesiones Antigravity parseadas: {len(self.antigravity_sessions)} "
+              f"(con proyecto Claude: {matched}, sin proyecto: "
+              f"{len(self.antigravity_sessions) - matched})")
+
 
     # ========================================================================
     # GENERACION DE REPORTES
@@ -2096,6 +2463,11 @@ class SessionProcessor:
         if self.opencode_sessions:
             self._generate_opencode_report()
             self._generate_opencode_models_report()
+
+        # v5.2: Reportes Antigravity CLI
+        if self.antigravity_sessions:
+            self._generate_antigravity_report()
+            self._generate_antigravity_models_report()
 
         print(f"Reportes generados exitosamente en {self.output_dir}")
         print(f"{len(os.listdir(self.output_dir))} archivos creados")
@@ -3034,6 +3406,28 @@ class SessionProcessor:
             content.append(f"| **Costo reportado** | **${o_cost:.4f}** |\n")
             content.append(f"| Costo por turno | ${(o_cost / o_turns) if o_turns else 0:.4f} |\n")
             content.append("\n*Detalle por modelo en `15_opencode_modelos_uso.md`.*\n")
+
+        # v5.2: Consumo Antigravity CLI
+        if self.antigravity_sessions:
+            content.append("\n---\n\n")
+            content.append("## Consumo Antigravity CLI\n\n")
+            a_input = sum(s['usage']['input'] for s in self.antigravity_sessions)
+            a_output = sum(s['usage']['output'] for s in self.antigravity_sessions)
+            a_reason = sum(s['usage']['reasoning'] for s in self.antigravity_sessions)
+            a_total = sum(s['usage']['total'] for s in self.antigravity_sessions)
+            a_turns = sum(len(s['qa_pairs']) for s in self.antigravity_sessions)
+            a_reqs = sum(sum(mu['requests'] for mu in s['model_usage'].values())
+                         for s in self.antigravity_sessions)
+            content.append("| Concepto | Valor |\n|----------|------:|\n")
+            content.append(f"| Conversaciones | {len(self.antigravity_sessions)} |\n")
+            content.append(f"| Turnos Q&A | {a_turns} |\n")
+            content.append(f"| Generaciones LLM | {a_reqs:,} |\n")
+            content.append(f"| Input tokens (contexto) | {a_input:,} |\n")
+            content.append(f"| Output tokens | {a_output:,} |\n")
+            content.append(f"| Reasoning tokens | {a_reason:,} |\n")
+            content.append(f"| **Total tokens** | **{a_total:,}** |\n")
+            content.append("\n*Antigravity CLI no publica costo en dinero en sus datos locales.*\n")
+            content.append("\n*Detalle por modelo en `17_antigravity_modelos_uso.md`.*\n")
 
         full_content = ''.join(content)
         self._split_large_file(output_file, full_content)
@@ -4060,6 +4454,170 @@ class SessionProcessor:
         self._split_large_file(output_file, full_content)
         print(f"  Reporte modelos OpenCode generado: {output_file.name}")
 
+    def _generate_antigravity_report(self):
+        """Conversaciones Antigravity agrupadas por proyecto Claude: cronologia,
+        reglas de matching y Q&A."""
+        output_file = self.output_dir / "16_antigravity_sesiones.md"
+
+        matched = {}
+        unmatched = []
+        for s in self.antigravity_sessions:
+            if s['project']:
+                matched.setdefault(s['project'], []).append(s)
+            else:
+                unmatched.append(s)
+
+        content = []
+        content.append("# Sesiones de Antigravity CLI (Google, agy)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        rules = {}
+        for s in self.antigravity_sessions:
+            if s['match_rule']:
+                rules[s['match_rule']] = rules.get(s['match_rule'], 0) + 1
+        content.append(f"- Conversaciones procesadas: **{len(self.antigravity_sessions)}**\n")
+        content.append(f"- Vinculadas a un proyecto Claude: **{sum(len(v) for v in matched.values())}** "
+                       f"(cwd: {rules.get('cwd', 0)}, paths: {rules.get('paths', 0)}, "
+                       f"tiempo: {rules.get('tiempo', 0)})\n")
+        content.append(f"- Sin proyecto identificable: **{len(unmatched)}**\n\n")
+
+        def render_session(s):
+            name = s['title'] or s['session_id']
+            content.append(f"### {name}\n\n")
+            content.append(f"- **ID:** `{s['session_id']}` | **Steps:** {s['steps']}\n")
+            content.append(f"- **Periodo:** {self._format_timestamp(s['start_time'] or '')} -> "
+                           f"{self._format_timestamp(s['end_time'] or '')}"
+                           f" ({self._calculate_interaction_duration(s['start_time'] or '', s['end_time'] or '') or 'N/A'})\n")
+            content.append(f"- **Workspace:** `{s['cwd'] or '?'}`\n")
+            if s['project']:
+                content.append(f"- **Proyecto Claude:** `{Path(s['project']).name}` "
+                               f"(regla: `{s['match_rule']}`, prefijo: {s['match_score']})\n")
+            if s['models_used']:
+                models = ', '.join(f"{m} ({c})" for m, c in
+                                   sorted(s['models_used'].items(), key=lambda x: -x[1]))
+                content.append(f"- **Modelos (generaciones):** {models}\n")
+            u = s['usage']
+            content.append(f"- **Tokens:** {u['total']:,} (contexto {u['input']:,} / "
+                           f"output {u['output']:,} / reasoning {u['reasoning']:,})\n")
+            if s['tool_calls']:
+                tools = ', '.join(f"{t} ({c})" for t, c in
+                                  sorted(s['tool_calls'].items(), key=lambda x: -x[1])[:12])
+                content.append(f"- **Tools:** {tools}\n")
+            content.append(f"- **Turnos Q&A:** {len(s['qa_pairs'])}\n\n")
+
+            for i, qa in enumerate(s['qa_pairs'], 1):
+                ts = self._format_timestamp(qa.get('ts_user') or '')
+                content.append(f"#### [{i}] Usuario ({ts}):\n\n")
+                ut = qa['user']
+                if len(ut) > 8000:
+                    content.append(ut[:8000] + "\n\n_[... truncado ...]_\n\n")
+                else:
+                    content.append(ut + "\n\n")
+                at = qa['assistant']
+                if at:
+                    content.append("**Agente:**\n\n")
+                    if len(at) > 12000:
+                        content.append(at[:12000] + "\n\n_[... truncado ...]_\n\n")
+                    else:
+                        content.append(at + "\n\n")
+                else:
+                    content.append("**Agente:** _(sin respuesta de texto; solo operaciones)_\n\n")
+
+        for proj in sorted(matched, key=lambda p: -len(matched[p])):
+            sess = sorted(matched[proj], key=lambda s: s['start_time'] or '')
+            tot_tokens = sum(s['usage']['total'] for s in sess)
+            content.append("---\n\n")
+            content.append(f"## Proyecto: `{Path(proj).name}`\n\n")
+            content.append(f"- **Ruta Claude:** `{proj}`\n")
+            content.append(f"- **Conversaciones Antigravity:** {len(sess)} | "
+                           f"**Total tokens:** {tot_tokens:,}\n\n")
+            content.append("**Cronologia:** " + '; '.join(
+                f"{(s['start_time'] or '')[:10]} {(s['title'] or s['session_id'])[:24]}"
+                for s in sess) + "\n\n")
+            for s in sess:
+                render_session(s)
+
+        if unmatched:
+            content.append("---\n\n")
+            content.append("## Sin proyecto identificable\n\n")
+            content.append("*Conversaciones cuyo workspace/paths no coinciden con ningun "
+                           "proyecto Claude analizado.*\n\n")
+            for s in sorted(unmatched, key=lambda s: s['start_time'] or ''):
+                render_session(s)
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte sesiones Antigravity generado: {output_file.name}")
+
+    def _generate_antigravity_models_report(self):
+        """Uso de modelos Antigravity: generaciones, tokens por tipo, maximo de
+        contexto y distribucion de herramientas. La fuente no publica costo en $."""
+        output_file = self.output_dir / "17_antigravity_modelos_uso.md"
+
+        agg = {}
+        tools = {}
+        for s in self.antigravity_sessions:
+            for model, mu in s['model_usage'].items():
+                a = agg.setdefault(model, {
+                    'input': 0, 'output': 0, 'reasoning': 0, 'total': 0,
+                    'requests': 0, 'sessions': set(), 'turns': 0, 'answered_turns': 0,
+                    'max_context': 0})
+                a['input'] += mu['input']
+                a['output'] += mu['output']
+                a['reasoning'] += mu['reasoning']
+                a['total'] += mu['total']
+                a['requests'] += mu['requests']
+                a['sessions'].add(s['session_id'])
+            for t, c in s['tool_calls'].items():
+                tools[t] = tools.get(t, 0) + c
+            dominant = max(s['model_usage'], key=lambda m: s['model_usage'][m]['requests']) \
+                if s['model_usage'] else ''
+            if dominant and dominant in agg:
+                agg[dominant]['turns'] += len(s['qa_pairs'])
+                agg[dominant]['answered_turns'] += sum(1 for q in s['qa_pairs'] if q['assistant'])
+
+        content = []
+        content.append("# Uso de Modelos en Antigravity CLI (Google, agy)\n\n")
+        content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        content.append("*Tokens de contexto acumulados por generacion (f5) y de salida (f3). "
+                       "Antigravity no publica costo en dinero en sus datos locales.*\n\n")
+
+        content.append("| Modelo | Conversaciones | Generaciones | Tokens totales | Contexto (suma) | Output | Reasoning | T. con respuesta |\n")
+        content.append("|--------|---------------:|-------------:|--------------:|----------------:|-------:|----------:|----------------:|\n")
+        for model, a in sorted(agg.items(), key=lambda x: -x[1]['requests']):
+            ans_rate = (a['answered_turns'] / a['turns'] * 100) if a['turns'] else None
+            ans_str = f"{ans_rate:.0f}%" if ans_rate is not None else "—"
+            content.append(
+                f"| {model} | {len(a['sessions'])} | {a['requests']:,} | {a['total']:,} "
+                f"| {a['input']:,} | {a['output']:,} | {a['reasoning']:,} | {ans_str} |\n")
+
+        tot_tokens = sum(a['total'] for a in agg.values())
+        content.append(f"\n**Total Antigravity:** {tot_tokens:,} tokens | "
+                       f"{sum(a['requests'] for a in agg.values()):,} generaciones\n\n")
+
+        if tools:
+            content.append("---\n\n## Herramientas mas usadas\n\n")
+            content.append("| Tool | Llamadas |\n|------|---------:|\n")
+            for t, c in sorted(tools.items(), key=lambda x: -x[1])[:30]:
+                content.append(f"| `{t}` | {c:,} |\n")
+            content.append("\n")
+
+        content.append("---\n\n## Desglose por conversacion\n\n")
+        content.append("| Conversacion | Titulo | Proyecto | Workspace | Modelo(s) | Turnos | Tokens |\n")
+        content.append("|--------------|--------|----------|-----------|-----------|-------:|-------:|\n")
+        for s in sorted(self.antigravity_sessions, key=lambda s: s['start_time'] or ''):
+            top_models = sorted(s['model_usage'].items(), key=lambda x: -x[1]['requests'])[:2]
+            models_str = ', '.join(m for m, _ in top_models) or '—'
+            proj = Path(s['project']).name if s['project'] else '—'
+            title = (s['title'] or s['session_id'])[:40].replace('|', '/')
+            ws = (s['cwd'] or '—')[:48].replace('|', '/')
+            content.append(
+                f"| `{s['session_id'][:12]}...` | {title} | {proj} | `{ws}` "
+                f"| {models_str} | {len(s['qa_pairs'])} | {s['usage']['total']:,} |\n")
+
+        full_content = ''.join(content)
+        self._split_large_file(output_file, full_content)
+        print(f"  Reporte modelos Antigravity generado: {output_file.name}")
+
     def _split_large_file(self, file_path: Path, content: str, max_size_mb: int = 2):
         """Divide archivos grandes en multiples partes si superan el tamano maximo"""
         max_size_bytes = max_size_mb * 1024 * 1024
@@ -4136,7 +4694,7 @@ class SessionProcessor:
     # ENTRADA PRINCIPAL
     # ========================================================================
 
-    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None, opencode_dir=None):
+    def process_all_files(self, last_n=None, file_history=None, no_subagents=False, codex_dir=None, qwen_dir=None, pencil_dir=None, opencode_dir=None, antigravity_dir=None):
         """Procesa todos los archivos JSONL en el directorio o el archivo indicado"""
         if self.input_file:
             jsonl_files = [self.input_file]
@@ -4184,8 +4742,15 @@ class SessionProcessor:
                 print(f"\nCargando sesiones de OpenCode desde {opencode_dir}...")
                 self._load_opencode_sessions(opencode_dir)
 
+            # v5.2: Cargar sesiones de Antigravity CLI
+            if antigravity_dir:
+                self.antigravity_dir = antigravity_dir
+                print(f"\nCargando sesiones de Antigravity CLI desde {antigravity_dir}...")
+                self._load_antigravity_sessions(antigravity_dir)
+
             if (self.subagent_data or self.memory_data or self.codex_matched
-                    or self.qwen_sessions or self.pencil_sessions or self.opencode_sessions):
+                    or self.qwen_sessions or self.pencil_sessions or self.opencode_sessions
+                    or self.antigravity_sessions):
                 self.generate_reports()
             else:
                 print("No se encontraron datos para procesar.")
@@ -4243,6 +4808,12 @@ class SessionProcessor:
             print(f"\nCargando sesiones de OpenCode desde {opencode_dir}...")
             self._load_opencode_sessions(opencode_dir)
 
+        # v5.2: Cargar sesiones de Antigravity CLI
+        if antigravity_dir:
+            self.antigravity_dir = antigravity_dir
+            print(f"\nCargando sesiones de Antigravity CLI desde {antigravity_dir}...")
+            self._load_antigravity_sessions(antigravity_dir)
+
         # Generar reportes
         self.generate_reports()
 
@@ -4256,7 +4827,7 @@ class SessionProcessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Procesar sesiones de Claude Code v5.1 (subagentes, memoria, integración Codex + Qwen + Pencil + OpenCode)',
+        description='Procesar sesiones de Claude Code v5.2 (subagentes, memoria, integración Codex + Qwen + Pencil + OpenCode + Antigravity CLI)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
@@ -4267,13 +4838,14 @@ Ejemplos:
   python3 process_sessions.py . -o reportes --codex-dir ~/.codex/ --qwen-dir ~/.qwen/
   python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
   python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode/
+  python3 process_sessions.py . -o reportes --antigravity-dir ~/.gemini/antigravity-cli/
   python3 process_sessions.py . --file-history CLAUDE.md
   python3 process_sessions.py . --no-subagents
         """
     )
     parser.add_argument('input_dir', nargs='?', default='.',
                         help='Directorio con archivos .jsonl o archivo individual (por defecto: \'.\')')
-    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.1.0')
+    parser.add_argument('-v', '--version', action='version', version='AI Session Analyzer v5.2.0')
     parser.add_argument('-o', '--output', help='Directorio de salida para reportes')
     parser.add_argument('--last', type=int, help='Extraer las ultimas N conversaciones en un archivo separado')
     parser.add_argument('--file-history', help='Generar historial completo de modificaciones para un archivo especifico')
@@ -4287,6 +4859,8 @@ Ejemplos:
                         help='Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño')
     parser.add_argument('--opencode-dir',
                         help='Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas')
+    parser.add_argument('--antigravity-dir',
+                        help='Directorio de Antigravity CLI (~/.gemini/antigravity-cli/) para integrar sus conversaciones')
 
     args = parser.parse_args()
 
@@ -4296,7 +4870,7 @@ Ejemplos:
         sys.exit(1)
 
     processor = SessionProcessor(args.input_dir, args.output)
-    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir, args.opencode_dir)
+    processor.process_all_files(args.last, args.file_history, args.no_subagents, args.codex_dir, args.qwen_dir, args.pencil_dir, args.opencode_dir, args.antigravity_dir)
 
 
 if __name__ == "__main__":

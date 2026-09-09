@@ -4,11 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Dependencies: Stdlib Only](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-brightgreen.svg)](requirements.txt)
 
-Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
+Script y suite en Python para procesar, auditar y analizar sesiones de multiples agentes de IA (**Claude Code**, **OpenAI Codex**, **Qwen CLI**, **Pencil/pen.dev**, **OpenCode CLI**, **Antigravity CLI**), extrayendo informacion clave, métricas de tokens, operaciones de archivos y generando reportes estructurados.
 
 ## Descripcion
 
-Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen, sesiones de diseño de Pencil (pen.dev) y sesiones de OpenCode CLI sobre los mismos proyectos. Genera reportes detallados que incluyen:
+Este script procesa sesiones de Claude Code como fuente principal, integrando delegaciones a Codex (GPT-5.4), actividad paralela de Qwen, sesiones de diseño de Pencil (pen.dev) y sesiones de OpenCode CLI y conversaciones de Antigravity CLI (Google) sobre los mismos proyectos. Genera reportes detallados que incluyen:
 - Historico de mensajes del usuario
 - Respuestas del sistema
 - Pares de preguntas y respuestas
@@ -21,7 +21,8 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 - **v4.0:** Integracion con Codex CLI (GPT-5.4) — detecta delegaciones, matchea sesiones, enriquece reportes
 - **v4.1:** Integracion con Qwen CLI — visibilidad de actividad paralela en el mismo proyecto
 - **v5.0:** Integracion con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicacion inteligente al proyecto Claude (cwd/.pen/timestamps) + estadisticas por modelo
-- **v5.1 (Actual):** Integracion con OpenCode CLI — sesiones paralelas leidas de `opencode.db` (SQLite), Q&A + tokens/costo por modelo y adjudicacion al proyecto Claude (cwd/paths/timestamps)
+- **v5.1:** Integracion con OpenCode CLI — sesiones paralelas leidas de `opencode.db` (SQLite), Q&A + tokens/costo por modelo y adjudicacion al proyecto Claude (cwd/paths/timestamps)
+- **v5.2 (Actual):** Integracion con Antigravity CLI (Google, `agy`) — conversaciones leidas de `conversations/*.db` (SQLite + protobuf), Q&A + tokens/modelos y adjudicacion al proyecto Claude (workspace/paths/timestamps)
 
 ## Instalacion
 
@@ -110,6 +111,12 @@ python3 process_sessions.py . -o reportes --pencil-dir ~/.pencil/
 python3 process_sessions.py . -o reportes --opencode-dir ~/.local/share/opencode/
 ```
 
+### Funcionalidades v5.2 (Integracion Antigravity CLI)
+```bash
+# Incluir conversaciones de Antigravity CLI (Google, agy), adjudicadas al proyecto Claude
+python3 process_sessions.py . -o reportes --antigravity-dir ~/.gemini/antigravity-cli/
+```
+
 ### Ver todas las opciones
 ```bash
 python3 process_sessions.py --help
@@ -150,6 +157,8 @@ tu-proyecto/
     ├── 13_pencil_modelos_uso.md          # v5.0 (con --pencil-dir)
     ├── 14_opencode_sesiones.md           # v5.1 (con --opencode-dir)
     ├── 15_opencode_modelos_uso.md        # v5.1 (con --opencode-dir)
+    ├── 16_antigravity_sesiones.md        # v5.2 (con --antigravity-dir)
+    ├── 17_antigravity_modelos_uso.md     # v5.2 (con --antigravity-dir)
     ├── log_operaciones_archivos.md
     ├── ultimas_N_conversaciones.md       (opcional con --last)
     └── historial_ARCHIVO.md              (opcional con --file-history)
@@ -201,6 +210,23 @@ Ver `PENCIL_DATA_GUIDE.md` para el formato y el algoritmo de adjudicacion.
 Se abre **read-only** y todo se extrae con `json_extract` + `substr` server-side:
 los `data` crudos pueden medir decenas de MB (`summary.diffs`, `tool.state.output`)
 y nunca se cargan. Ver `OPENCODE_DATA_GUIDE.md` para el detalle.
+
+### Datos de Antigravity CLI (fuente externa, v5.2)
+```
+~/.gemini/antigravity-cli/           # Directorio de datos de Antigravity CLI (--antigravity-dir)
+├── conversations/{uuid}.db          # UNA base SQLite por conversacion (fuente de verdad)
+└── cache/conversation_metadata.json # titulos/workspace (metadata liviana)
+```
+
+| Tabla | Contenido |
+|-------|-----------|
+| `steps` | `step_payload` **protobuf**: type 14 (prompt user + workspace), 15 (respuesta/tools del agente), 132 (tool results) |
+| `gen_metadata` | una fila por generacion LLM: modelo (`gemini-3.8-flash`, `claude-sonnet-4-6`, …) + usage |
+| `trajectory_metadata_blob` | workspace `file:///...` de la conversacion (clave del matching) |
+
+Los BLOBs se decodifican con un lector wire-format generico (sin schema, stdlib):
+nunca se regexean los binarios completos y los tool-results (~100 KB) se descartan.
+Ver `ANTIGRAVITY_DATA_GUIDE.md` para el detalle.
 
 ## Reportes Generados
 
@@ -379,18 +405,47 @@ Util para:
 - Comparar que modelo/variant rinde mejor (costo por turno y respuestas de texto)
 - Detectar sesiones abortadas o con errores por modelo
 
-### 17. Log de Operaciones CSV (`log_operaciones_archivos.md`)
+### 17. Sesiones Antigravity (`16_antigravity_sesiones.md`) - v5.2
+**Nuevo en v5.2! Requiere `--antigravity-dir`**
+
+Conversaciones de Antigravity CLI (una por `.db`) agrupadas por el proyecto Claude al que pertenecen:
+- **Adjudicacion inteligente** en 3 reglas auditables (cada conversacion reporta cual la gano):
+  1. `cwd` — workspace de la trajectory con prefijo comun + contencion real
+  2. `paths` — votacion por rutas de tool calls (AbsolutePath/DirectoryPath) y prompts
+  3. `tiempo` — desempate por solapamiento con actividad Claude
+- **Q&A recuperado:** prompt del usuario + textos de respuesta del agente por turno, con timestamp
+- **Metadata por conversacion:** titulo, workspace, steps, tokens (contexto/output/reasoning), tools usadas
+- Seccion final "Sin proyecto identificable" para auditoria de conversaciones sueltas
+
+Util para:
+- Reconstruir que se hizo con `agy` en el mismo repo mientras Claude trabajaba
+- Auditar el consumo real por conversacion (el workspace de Antigravity suele ser el mismo repo)
+
+### 18. Uso de Modelos Antigravity (`17_antigravity_modelos_uso.md`) - v5.2
+**Nuevo en v5.2! Requiere `--antigravity-dir`**
+
+Estadisticas por modelo desde `gen_metadata` (fuente oficial de cada generacion):
+- Generaciones, tokens (contexto acumulado, output, reasoning) y tasa de turnos con respuesta
+- Antigravity **no publica costo en dinero** en sus datos locales: el reporte es en tokens
+- Top 30 de herramientas (`view_file`, `run_command`, `replace_file_content`, MCP…)
+- Desglose por conversacion con titulo, proyecto, workspace y modelos
+
+Util para:
+- Comparar Gemini vs Claude (la CLI alterna modelos segun tarea) en consumo real
+- Detectar a que proyecto fue cada conversacion y con que modelo se resolvio
+
+### 19. Log de Operaciones CSV (`log_operaciones_archivos.md`)
 Log simple compatible con Excel/Google Sheets:
 - **Formato**: `Operacion;Ruta;Herramienta;Sesion;Timestamp;Origen`
 - v3.0: Columna `Origen` indica si es sesion principal o subagente
 - Importable: Usar `;` como separador en hojas de calculo
 
-### 18. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
+### 20. Ultimas N Conversaciones (`ultimas_N_conversaciones.md`)
 **Generado con `--last N`**
 - Extrae las ultimas N conversaciones mas recientes
 - v3.0: Incluye subagentes vinculados a cada interaccion
 
-### 19. Historial de Archivo (`historial_ARCHIVO.md`)
+### 21. Historial de Archivo (`historial_ARCHIVO.md`)
 **Generado con `--file-history FILENAME`**
 - Timeline completo de modificaciones de un archivo especifico
 - v3.0: Incluye modificaciones hechas por subagentes
@@ -491,6 +546,20 @@ Con `--opencode-dir`, el script:
 
 Ver `OPENCODE_DATA_GUIDE.md` para documentacion detallada del esquema y el algoritmo de matching.
 
+## Integracion con Antigravity CLI (v5.2)
+
+Antigravity CLI (`agy`, Google) es una CLI de agentes que alterna modelos Gemini y Claude.
+Sus sesiones ocurren **en paralelo** a las de Claude sobre los mismos repos y su fuente de
+datos es una **base SQLite por conversacion** (`~/.gemini/antigravity-cli/conversations/{uuid}.db`)
+con payloads **Protocol Buffers** sin schema publica.
+
+Con `--antigravity-dir`, el script:
+1. **Abre cada `.db` read-only** (`mode=ro&immutable=1`: nunca escribe al lado de la app) y recorre `steps` fila por fila
+2. **Decodifica el wire-format protobuf** con un lector generico minimo: solo los numeros de campo documentados en `ANTIGRAVITY_DATA_GUIDE.md` (14=user, 15=agente, 132=tool result); los outputs de tools (decenas de KB) se descartan
+3. **Reconstruye el Q&A** por turno y el **usage por modelo** desde `gen_metadata` (modelo + tokens de cada generacion LLM)
+4. **Adjudica cada conversacion** al proyecto Claude: workspace (regla cwd) → votacion por rutas de tool calls → solapamiento temporal (reutiliza el motor de Pencil; cada conversacion reporta la regla usada)
+5. **Genera** `16_antigravity_sesiones.md`, `17_antigravity_modelos_uso.md` y seccion "Consumo Antigravity" en `09_eficiencia_tokens.md`
+
 ### Guías de integración
 
 | Guía | Contenido |
@@ -498,6 +567,7 @@ Ver `OPENCODE_DATA_GUIDE.md` para documentacion detallada del esquema y el algor
 | `CODEX_DATA_GUIDE.md` | Formato de datos de Codex CLI |
 | `PENCIL_DATA_GUIDE.md` | Formato de datos de Pencil + algoritmo de adjudicacion |
 | `OPENCODE_DATA_GUIDE.md` | Formato del SQLite de OpenCode (opencode.db) + reglas de adjudicacion |
+| `ANTIGRAVITY_DATA_GUIDE.md` | Formato del SQLite+protobuf de Antigravity CLI (conversations/*.db) + reglas de adjudicacion |
 | `HOW_TO_ADD_A_PROVIDER.md` | **Checklist de 6 pasos para integrar una herramienta nueva** (Antigravity CLI, etc.) con trampas de performance ya conocidas |
 
 ## Opciones de Linea de Comandos
@@ -508,6 +578,7 @@ usage: process_sessions.py [-h] [-v] [-o OUTPUT] [--last LAST]
                            [--codex-dir CODEX_DIR] [--qwen-dir QWEN_DIR]
                            [--pencil-dir PENCIL_DIR]
                            [--opencode-dir OPENCODE_DIR]
+                           [--antigravity-dir ANTIGRAVITY_DIR]
                            [input_dir]
 
 Argumentos:
@@ -521,6 +592,7 @@ Argumentos:
   --qwen-dir DIR        Directorio de Qwen CLI (~/.qwen/) para incluir sesiones paralelas
   --pencil-dir DIR      Directorio de Pencil (~/.pencil/) para integrar sesiones de diseño
   --opencode-dir DIR    Directorio de OpenCode (~/.local/share/opencode/) para integrar sesiones paralelas
+  --antigravity-dir DIR Directorio de Antigravity CLI (~/.gemini/antigravity-cli/) para integrar sus conversaciones
 ```
 
 ## Caracteristicas Tecnicas
@@ -533,6 +605,7 @@ Argumentos:
 - v4.1: Matchea proyecto Claude con proyecto Qwen por CWD
 - v5.0: Adjudica sesiones Pencil al proyecto Claude por prefijo de cwd, votacion por rutas .pen o solapamiento temporal
 - v5.1: Adjudica sesiones OpenCode (SQLite) al proyecto Claude por prefijo de cwd con contencion real, votacion por rutas de patches/tools o solapamiento temporal
+- v5.2: Adjudica conversaciones Antigravity CLI (SQLite+protobuf) al proyecto Claude por workspace de la trajectory, votacion por rutas de tool calls o solapamiento temporal
 - Procesa multiples sesiones
 
 ### Extraccion Inteligente
@@ -564,7 +637,23 @@ Argumentos:
 
 ## Actualizaciones
 
-### Version 5.1 (Actual)
+### Version 5.2 (Actual)
+- Integracion con Antigravity CLI (Google, `agy`) via `--antigravity-dir`
+  (fuente: `~/.gemini/antigravity-cli/conversations/*.db`, una base SQLite por conversacion)
+- **Decoder wire-format protobuf generico** (stdlib, sin schema): extrae prompts (step 14),
+  respuestas/tool calls del agente (step 15) y modelos/usage desde `gen_metadata`;
+  los tool-results (step 132, ~100 KB) se decodifican y descartan — parseo fila por fila
+- Bases abiertas **read-only** con `mode=ro&immutable=1`: no interfiere con `agy` en ejecucion
+  y no deja archivos `-wal`/`-shm` en el directorio de la herramienta
+- Adjudicacion al proyecto Claude reutilizando el motor de Pencil/OpenCode con 3 reglas
+  auditables: workspace (cwd) → votacion por rutas de tool calls → solapamiento temporal
+- Titulo/workspace reforzados con `cache/conversation_metadata.json` cuando el `.db` no aporta
+- Nuevo reporte: `16_antigravity_sesiones.md` — conversaciones agrupadas por proyecto con Q&A
+- Nuevo reporte: `17_antigravity_modelos_uso.md` — generaciones/tokens por modelo + top de tools
+- Seccion "Consumo Antigravity" agregada a `09_eficiencia_tokens.md` (la fuente no publica costo en USD)
+- Documentacion de formato en `ANTIGRAVITY_DATA_GUIDE.md`
+
+### Version 5.1
 - Integracion con OpenCode CLI via `--opencode-dir` (fuente: `~/.local/share/opencode/opencode.db`)
 - Lectura SQLite **read-only** con extraccion `json_extract` + caps `substr` server-side:
   filas de `message`/`part` de hasta 31 MB nunca se cargan enteras (DB completa: <2 s)

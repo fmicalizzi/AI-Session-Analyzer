@@ -1,7 +1,7 @@
-# Cómo agregar una nueva herramienta de agentes (checklist v5.1)
+# Cómo agregar una nueva herramienta de agentes (checklist v5.2)
 
-Guía de integración probada con **Codex (v4.0)**, **Qwen (v4.1)**, **Pencil (v5.0)** y
-**OpenCode (v5.1)**.
+Guía de integración probada con **Codex (v4.0)**, **Qwen (v4.1)**, **Pencil (v5.0)**,
+**OpenCode (v5.1)** y **Antigravity CLI (v5.2)**.
 Cada herramienta nueva sigue los mismos 6 pasos de código + documentación + tests.
 Tiempo típico: 1 sesión de trabajo.
 
@@ -103,15 +103,16 @@ gh run watch <id> --exit-status   # verde en la matriz antes de dar por hecho
 
 | Pieza | Buscar |
 |-------|--------|
-| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions`, `_load_opencode_sessions` |
-| Parser | `_parse_pencil_session` (streaming), `_query_opencode_*` (SQLite: `json_extract` + `substr` server-side, jamás `SELECT data` crudo) |
-| Matching | `_best_project_match`, `_match_pencil_project`, `_match_opencode_project`, `_collect_claude_project_cwds` |
-| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report`, `_generate_opencode_report`, `_generate_opencode_models_report` |
+| Hook de carga | `_load_pencil_sessions`, `_load_qwen_sessions`, `_load_opencode_sessions`, `_load_antigravity_sessions` |
+| Parser | `_parse_pencil_session` (streaming), `_query_opencode_*` (SQLite: `json_extract` + `substr` server-side, jamás `SELECT data` crudo), `_parse_antigravity_conversation` (SQLite+protobuf: `_pb_fields` decodifica fila por fila, tool-results se descartan) |
+| Matching | `_best_project_match`, `_match_pencil_project`, `_match_opencode_project`, `_match_antigravity_project`, `_collect_claude_project_cwds` |
+| Reportes | `_generate_pencil_report`, `_generate_pencil_models_report`, `_generate_opencode_report`, `_generate_opencode_models_report`, `_generate_antigravity_report`, `_generate_antigravity_models_report` |
 | Split seguro | `_split_large_file` |
-| CLI | `main()` → `--pencil-dir` / `--opencode-dir` como plantilla de flag |
+| CLI | `main()` → `--pencil-dir` / `--opencode-dir` / `--antigravity-dir` como plantilla de flag |
 
-### Si la fuente es SQLite (OpenCode y futuros)
+### Si la fuente es SQLite (OpenCode, Antigravity y futuros)
 - Abrir **read-only**: `sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)`; degradar con WARN si no se puede.
 - Extraer campos con `json_extract(data,'$.x')` y `substr(...,1,N)` **en el SELECT**: evita traer `data` crudos de 30 MB. Verificar antes que la build tenga JSON1 (`SELECT json_extract('{"a":1}','$.a')`).
 - Si la tabla tiene rollups de costo/tokens (`session.cost`, `tokens_*`), validar contra la suma de mensajes y usarlos: son exactos y gratis.
 - ids tipo `msg_...`/`prt_...` suelen ser cronológicamente ordenables; aprovechar los índices `(session_id,...)` existentes en vez de ordenar por columnas no indexadas.
+- Si los blobs son **protobuf sin schema** (Antigravity): lector wire-format genérico (`_pb_varint`/`_pb_fields`, ~40 líneas stdlib) extrayendo solo los números de campo documentados en la guía; jamás `re` sobre el binario completo. Abrir con `mode=ro&immutable=1` para no dejar `-wal`/`-shm` en el directorio de la app. Verificar que la metadata de la app (`cache/*.json`, archivo chico) sirve para títulos/workspace pero nunca como fuente de verdad.
