@@ -21,7 +21,7 @@ Este script procesa sesiones de Claude Code como fuente principal, integrando de
 - **v3.1:** Reporte de eficiencia y consumo de tokens (por sesión, ranking, modelos)
 - **v4.0:** Integración con Codex CLI (GPT-5.4) — detecta delegaciones, matchea sesiones, enriquece reportes
 - **v4.1:** Integración con Qwen CLI — visibilidad de actividad paralela en el mismo proyecto
-- **v5.0:** Integración con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicación inteligente al proyecto Claude (cwd/.pen/timestamps) + estadisticas por modelo
+- **v5.0:** Integración con Pencil (pen.dev) — sesiones de diseño con Q&A recuperado y adjudicación inteligente al proyecto Claude (cwd/.pen/timestamps) + estadísticas por modelo
 - **v5.1:** Integración con OpenCode CLI — sesiones paralelas leídas de `opencode.db` (SQLite), Q&A + tokens/costo por modelo y adjudicación al proyecto Claude (cwd/paths/timestamps)
 - **v5.2:** Integración con Antigravity CLI (Google, `agy`) — conversaciones leídas de `conversations/*.db` (SQLite + protobuf), Q&A + tokens/modelos y adjudicación al proyecto Claude (workspace/paths/timestamps)
 - **v5.3 (Actual):** Integración con **pi** (coding agent, [badlogic/pi-mono](https://github.com/badlogic/pi-mono)) — sesiones JSONL por proyecto (`~/.pi/agent/sessions/<cwd-codificado>/*.jsonl`), Q&A + tokens/costo **acumulado por modelo** (pi cambia de modelo a mitad de sesión) y adjudicación al proyecto Claude por el `cwd` del header de sesión → paths de tool calls → solapamiento temporal
@@ -269,8 +269,8 @@ nivel de clase. Ver `PI_DATA_GUIDE.md` para el detalle.
 ## Reportes Generados
 
 ### 1. Resumen de Sesiones (`00_resumen_sesiones.md`)
-- Estadisticas generales (mensajes, operaciones, Q&A)
-- v4.x: Estadisticas de Codex y Qwen
+- Estadísticas generales (mensajes, operaciones, Q&A)
+- v4.x: Estadísticas de Codex y Qwen
 - v5.x: Bloque "Agentes externos" — sesiones/turnos/tokens/costo de Pencil, OpenCode, Antigravity y pi con cuantas quedaron adjudicadas a un proyecto Claude
 - v3.1: Tokens por sesión (input, output, cache creation, cache read)
 - v3.1: Modelo principal por sesión
@@ -317,7 +317,7 @@ Para cada pregunta-respuesta incluye:
 **Nuevo en v3.0!**
 
 Reporte completo de todos los subagentes:
-- Estadisticas globales (total, por tipo, tokens, herramientas top)
+- Estadísticas globales (total, por tipo, tokens, herramientas top)
 - Detalle por sesión con todos los subagentes
 - Para cada subagente: tarea asignada, herramientas usadas, archivos tocados, resultado
 - Detección de sesiones compactadas (context window management)
@@ -405,7 +405,7 @@ Sesiones del agente de diseño Pencil, agrupadas por el proyecto Claude al que p
 ### 14. Uso de Modelos Pencil (`13_pencil_modelos_uso.md`) - v5.0
 **Nuevo en v5.0! Requiere `--pencil-dir`**
 
-Estadisticas de uso por modelo en las sesiones de diseño:
+Estadísticas de uso por modelo en las sesiones de diseño:
 - Tokens (input/output/reasoning), requests API y **costo real en USD** por modelo
 - **$/turno** de conversación y **tasa de turnos con respuesta de texto**
 - Desglose por sesión con título, proyecto adjudicado y modelo dominante
@@ -436,7 +436,7 @@ Sesiones de OpenCode CLI agrupadas por el proyecto Claude al que pertenecen:
 ### 16. Uso de Modelos OpenCode (`15_opencode_modelos_uso.md`) - v5.1
 **Nuevo en v5.1! Requiere `--opencode-dir`**
 
-Estadisticas de uso por modelo (`provider/model (variant)`) en las sesiones OpenCode:
+Estadísticas de uso por modelo (`provider/model (variant)`) en las sesiones OpenCode:
 - Tokens (input/output/reasoning), requests assistant y **costo real en USD** por modelo
 - **$/turno** de conversación y **tasa de turnos con respuesta de texto**
 - Top 30 de herramientas usadas (incluye `invalid` = tool-calls erroneos del modelo)
@@ -465,7 +465,7 @@ Conversaciones de Antigravity CLI (una por `.db`) agrupadas por el proyecto Clau
 ### 18. Uso de Modelos Antigravity (`17_antigravity_modelos_uso.md`) - v5.2
 **Nuevo en v5.2! Requiere `--antigravity-dir`**
 
-Estadisticas por modelo desde `gen_metadata` (fuente oficial de cada generación):
+Estadísticas por modelo desde `gen_metadata` (fuente oficial de cada generación):
 - Generaciones, tokens (contexto acumulado, output, reasoning) y tasa de turnos con respuesta
 - Antigravity **no publica costo en dinero** en sus datos locales: el reporte es en tokens
 - Top 30 de herramientas (`view_file`, `run_command`, `replace_file_content`, MCP…)
@@ -491,7 +491,7 @@ Sesiones del coding agent pi agrupadas por proyecto Claude:
 ### 20. Uso de Modelos pi (`19_pi_modelos_uso.md`) - v5.3
 **Nuevo en v5.3! Requiere `--pi-dir`**
 
-Estadisticas por modelo, acumuladas desde el campo `model`/`usage` de cada mensaje
+Estadísticas por modelo, acumuladas desde el campo `model`/`usage` de cada mensaje
 assistant (no del `model_change` vigente): requests, tokens, costo USD, $/turno y tasa
 de turnos con respuesta de texto. Desglose por sesión con proyecto, `cwd` y modelos
 principales.
@@ -504,7 +504,7 @@ principales.
 Log simple compatible con Excel/Google Sheets:
 - **Formato**: `Operación;Ruta;Herramienta;Sesión;Timestamp;Origen`
 - v3.0: Columna `Origen` indica si es sesión principal o subagente
-- Importable: Usar `;` como separador en hojas de calculo
+- Importable: Usar `;` como separador en hojas de cálculo
 
 ### 22. Últimas N Conversaciones (`ultimas_N_conversaciones.md`)
 **Generado con `--last N`**
@@ -789,9 +789,9 @@ Argumentos:
 - Integración con Qwen CLI vía `--qwen-dir`
 - Detección automática de sesiones Qwen del mismo proyecto (por CWD)
 - Parser de formato Qwen (parts, functionCall/functionResponse, model role)
-- Nuevo reporte: `11_qwen_paralelo.md` — actividad paralela con detalle cronologico
+- Nuevo reporte: `11_qwen_paralelo.md` — actividad paralela con detalle cronológico
 - Correlación temporal: identifica días con actividad simultánea Claude+Qwen
-- Resumen de sesiones enriquecido con estadisticas de Qwen
+- Resumen de sesiones enriquecido con estadísticas de Qwen
 
 ### Versión 4.0
 - Integración con Codex CLI (OpenAI GPT-5.4) vía `--codex-dir`
@@ -799,7 +799,7 @@ Argumentos:
 - Matching de sesiones Codex por 3 criterios: timestamp + proyecto/CWD + prompt overlap
 - Nuevo reporte: `10_codex_integrado.md` — tareas, comandos, razonamiento y respuestas completas
 - Reporte de eficiencia ampliado con columna y tokens de Codex
-- Resumen de sesiones enriquecido con estadisticas de Codex
+- Resumen de sesiones enriquecido con estadísticas de Codex
 - Q&A mejorado muestra delegaciones a Codex inline
 - `CODEX_DATA_GUIDE.md` — documentación completa del formato de datos de Codex
 - `extract_codex_full.py` — script standalone para análisis de Codex puro
@@ -817,7 +817,7 @@ Argumentos:
 - Procesamiento completo de subagentes (`{session}/subagents/agent-*.jsonl`)
 - Lectura de tool-results externos (`{session}/tool-results/*.txt`)
 - Análisis de memoria del proyecto (`memory/*.md`)
-- Nuevo reporte: `06_subagentes_detalle.md` - estadisticas y detalle por subagente
+- Nuevo reporte: `06_subagentes_detalle.md` - estadísticas y detalle por subagente
 - Nuevo reporte: `07_memoria_proyecto.md` - decisiones y lecciones técnicas
 - Nuevo reporte: `08_tool_results_externos.md` - inventario de resultados externos
 - Subagentes integrados en reportes 05 Q&A mejorado y últimas N conversaciones

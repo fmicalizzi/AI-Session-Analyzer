@@ -1946,7 +1946,7 @@ class SessionProcessor:
             self._extract_paths_from_text(joined, sessions[sid]['external_paths'])
             per_session_texts.setdefault(sid, []).append((mid, role, ts, joined))
         for sid, items in per_session_texts.items():
-            items.sort(key=lambda x: x[0])  # msg id cronologico
+            items.sort(key=lambda x: x[0])  # msg id cronológico
             pending = None       # (text, ts)
             buf = []             # textos assistant del turno
             buf_ts = None
@@ -2743,27 +2743,27 @@ class SessionProcessor:
         print(f"{len(os.listdir(self.output_dir))} archivos creados")
 
     def _generate_sessions_summary(self):
-        """Genera resumen de todas las sesiones, incluyendo estadisticas de subagentes"""
+        """Genera resumen de todas las sesiones, incluyendo estadísticas de subagentes"""
         output_file = self.output_dir / "00_resumen_sesiones.md"
 
         content = []
         content.append("# Resumen de Sesiones Procesadas\n\n")
         content.append(f"**Fecha de procesamiento:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-        content.append("## Estadisticas Generales\n\n")
+        content.append("## Estadísticas Generales\n\n")
         content.append(f"- **Total de mensajes de usuario:** {len(self.user_messages)}\n")
         content.append(f"- **Total de respuestas del sistema:** {len(self.assistant_responses)}\n")
         content.append(f"- **Total de pares Q&A:** {len(self.qa_pairs)}\n")
         content.append(f"- **Total de operaciones de archivos:** {len(self.file_operations)}\n")
         content.append(f"- **Total de sesiones:** {len(self.sessions_summary)}\n")
 
-        # v3.0: Estadisticas de subagentes
+        # v3.0: Estadísticas de subagentes
         if self.subagent_data:
             content.append(f"- **Total de subagentes:** {len(self.subagent_data)}\n")
             content.append(f"- **Operaciones de subagentes:** {len(self.subagent_operations)}\n")
             content.append(f"- **Invocaciones Agent en sesiones principales:** {len(self.agent_invocations)}\n")
 
-        # v3.0: Estadisticas de tool-results
+        # v3.0: Estadísticas de tool-results
         total_tr = sum(len(files) for files in self.tool_results_data.values())
         if total_tr > 0:
             content.append(f"- **Archivos tool-results:** {total_tr}\n")
@@ -3258,8 +3258,8 @@ class SessionProcessor:
 
         content.append("\n---\n\n")
 
-        # Estadisticas globales
-        content.append("## Estadisticas Globales\n\n")
+        # Estadísticas globales
+        content.append("## Estadísticas Globales\n\n")
         content.append("| Métrica | Valor |\n")
         content.append("|---------|-------|\n")
         content.append(f"| Total subagentes | {len(self.subagent_data)} |\n")
@@ -4088,7 +4088,7 @@ class SessionProcessor:
             self._split_large_file(output_file, full_content)
             return
 
-        # Estadisticas por tipo de operación
+        # Estadísticas por tipo de operación
         operation_types = {}
         for op in file_operations:
             op_type = op.get('tool_name', 'unknown')
